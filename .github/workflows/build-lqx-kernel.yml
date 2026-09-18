@@ -1,9 +1,22 @@
-name: Build LQX Kernel (v7.2.6-lqx1)
+name: Build LQX Kernel
 
 on:
   push:
-    branches: [ main ]
+    tags:
+      - 'v*'
   workflow_dispatch:
+    inputs:
+      kernel_ref:
+        description: 'zen-kernel 的分支或 tag（如 v7.2.6-lqx1）'
+        required: true
+        default: 'v7.2.6-lqx1'
+
+permissions:
+  contents: write
+
+env:
+  # 默认构建的源码 ref；tag 触发时也可用下面逻辑覆盖
+  KERNEL_REF: ${{ github.event.inputs.kernel_ref || 'v7.2.6-lqx1' }}
 
 jobs:
   build:
@@ -18,27 +31,14 @@ jobs:
       run: |
         sudo apt-get update
         sudo apt-get install -y \
-          build-essential \
-          libncurses-dev \
-          bison \
-          flex \
-          libssl-dev \
-          libelf-dev \
-          libdw-dev \
-          elfutils \
-          bc \
-          dwarves \
-          zstd \
-          cpio \
-          rsync \
-          kmod \
-          debhelper \
-          fakeroot \
-          git
+          build-essential libncurses-dev bison flex \
+          libssl-dev libelf-dev libdw-dev elfutils \
+          bc dwarves zstd cpio rsync kmod \
+          debhelper fakeroot git
 
-    - name: Clone zen-kernel at v7.2.6-lqx1
+    - name: Clone zen-kernel at ${{ env.KERNEL_REF }}
       run: |
-        git clone --depth 1 --branch v7.2.6-lqx1 \
+        git clone --depth 1 --branch "${KERNEL_REF}" \
           https://github.com/zen-kernel/zen-kernel.git kernel-source
 
     - name: Apply custom .config
@@ -52,12 +52,27 @@ jobs:
         cd kernel-source
         make -j$(nproc) bindeb-pkg
 
-    - name: List generated .deb packages
-      run: ls -lh *.deb
+    # 只收集 image 和 headers，其他 deb 丢弃
+    - name: Collect only image and headers .deb
+      run: |
+        mkdir -p dist
+        mv linux-image-*.deb   dist/ 2>/dev/null || true
+        mv linux-headers-*.deb dist/ 2>/dev/null || true
+        echo "---- collected ----"
+        ls -lh dist/
 
-    - name: Upload kernel packages
+    - name: Upload artifacts
       uses: actions/upload-artifact@v4
       with:
         name: lqx-kernel-deb
-        path: "*.deb"
+        path: dist/*.deb
         if-no-files-found: error
+
+    - name: Publish to GitHub Release
+      if: startsWith(github.ref, 'refs/tags/')
+      uses: softprops/action-gh-release@v2
+      with:
+        name: LQX Kernel ${{ github.ref_name }}
+        tag_name: ${{ github.ref_name }}
+        files: dist/*.deb
+        generate_release_notes: true
