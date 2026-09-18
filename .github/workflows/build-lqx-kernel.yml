@@ -24,6 +24,8 @@ jobs:
           flex \
           libssl-dev \
           libelf-dev \
+          libdw-dev \
+          elfutils \
           bc \
           dwarves \
           zstd \
