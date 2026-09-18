@@ -4,15 +4,13 @@ on:
   workflow_dispatch:
     inputs:
       arch:
-        description: '目标架构（x86_64 / arm64 / arm / riscv64）'
+        description: '目标架构（x86_64 / arm64）'
         required: true
         default: 'x86_64'
         type: choice
         options:
           - x86_64
           - arm64
-          - arm
-          - riscv64
       kernel_repo:
         description: '内核源码仓库 URL'
         required: true
@@ -22,9 +20,9 @@ on:
         required: true
         default: 'v7.2.6-lqx1'
       config_file:
-        description: '仓库中配置文件路径（如 configs/lqx-x86_64.config）'
+        description: '仓库中配置文件路径（如 configs/G40_45.config）'
         required: true
-        default: 'configs/lqx-x86_64.config'
+        default: 'configs/G40_45.config'
       release_tag:
         description: '（可选）完成后发布到该 tag 的 Release，留空则不发布'
         required: false
@@ -35,7 +33,10 @@ permissions:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    # 按所选架构分配原生 runner：
+    #   x86_64 -> ubuntu-latest（x86_64）
+    #   arm64  -> ubuntu-24.04-arm（官方 arm64 runner）
+    runs-on: ${{ github.event.inputs.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
     timeout-minutes: 360
 
     steps:
@@ -49,34 +50,19 @@ jobs:
         echo "Ref:     ${{ github.event.inputs.kernel_ref }}"
         echo "Config:  ${{ github.event.inputs.config_file }}"
         echo "Release: ${{ github.event.inputs.release_tag }}"
+        echo "Runner:  ${{ runner.os }} / ${{ runner.arch }}"
 
     - name: Set arch variables
       id: arch
       run: |
         case "${{ github.event.inputs.arch }}" in
           x86_64|amd64)
-            echo "karch=x86_64"                      >> "$GITHUB_OUTPUT"
-            echo "cross="                            >> "$GITHUB_OUTPUT"
-            echo "cross_pkg="                        >> "$GITHUB_OUTPUT"
-            echo "deb_arch=amd64"                    >> "$GITHUB_OUTPUT"
+            echo "karch=x86_64"    >> "$GITHUB_OUTPUT"
+            echo "deb_arch=amd64"  >> "$GITHUB_OUTPUT"
             ;;
           arm64|aarch64)
-            echo "karch=arm64"                       >> "$GITHUB_OUTPUT"
-            echo "cross=aarch64-linux-gnu-"          >> "$GITHUB_OUTPUT"
-            echo "cross_pkg=gcc-aarch64-linux-gnu"   >> "$GITHUB_OUTPUT"
-            echo "deb_arch=arm64"                    >> "$GITHUB_OUTPUT"
-            ;;
-          arm|armhf|armv7)
-            echo "karch=arm"                         >> "$GITHUB_OUTPUT"
-            echo "cross=arm-linux-gnueabihf-"        >> "$GITHUB_OUTPUT"
-            echo "cross_pkg=gcc-arm-linux-gnueabihf" >> "$GITHUB_OUTPUT"
-            echo "deb_arch=armhf"                    >> "$GITHUB_OUTPUT"
-            ;;
-          riscv64)
-            echo "karch=riscv"                       >> "$GITHUB_OUTPUT"
-            echo "cross=riscv64-linux-gnu-"          >> "$GITHUB_OUTPUT"
-            echo "cross_pkg=gcc-riscv64-linux-gnu"   >> "$GITHUB_OUTPUT"
-            echo "deb_arch=riscv64"                  >> "$GITHUB_OUTPUT"
+            echo "karch=arm64"     >> "$GITHUB_OUTPUT"
+            echo "deb_arch=arm64"  >> "$GITHUB_OUTPUT"
             ;;
           *)
             echo "Unsupported arch: ${{ github.event.inputs.arch }}" >&2
@@ -97,8 +83,7 @@ jobs:
           build-essential libncurses-dev bison flex \
           libssl-dev libelf-dev libdw-dev elfutils \
           bc dwarves zstd cpio rsync kmod \
-          debhelper fakeroot git \
-          ${{ steps.arch.outputs.cross_pkg }}
+          debhelper fakeroot git
 
     - name: Verify config file exists
       run: |
@@ -116,26 +101,25 @@ jobs:
       run: |
         cd kernel-source
         cp "../${{ github.event.inputs.config_file }}" .config
-        make ARCH=${{ steps.arch.outputs.karch }} \
-             CROSS_COMPILE=${{ steps.arch.outputs.cross }} \
-             olddefconfig
+        make ARCH=${{ steps.arch.outputs.karch }} olddefconfig
 
     - name: Build kernel packages
       run: |
         cd kernel-source
         make ARCH=${{ steps.arch.outputs.karch }} \
-             CROSS_COMPILE=${{ steps.arch.outputs.cross }} \
+             KDEB_ARCH=${{ steps.arch.outputs.deb_arch }} \
              KDEB_OPTS="-a${{ steps.arch.outputs.deb_arch }}" \
              -j$(nproc) bindeb-pkg
 
     - name: Collect image and headers .deb
       run: |
         mkdir -p dist
-        mv linux-image-*.deb   dist/ 2>/dev/null || true
-        mv linux-headers-*.deb dist/ 2>/dev/null || true
+        # 只收集主 image（排除 dbg 包）和 headers
+        find . -maxdepth 1 -type f -name 'linux-image-*.deb' ! -name '*-dbg_*.deb' -exec mv {} dist/ \;
+        find . -maxdepth 1 -type f -name 'linux-headers-*.deb' -exec mv {} dist/ \;
         echo "---- collected ----"
         ls -lh dist/
-        test -n "$(ls -A dist/*.deb 2>/dev/null)"
+        test -n "$(find dist -maxdepth 1 -name '*.deb' -print -quit)"
 
     - name: Upload artifacts
       uses: actions/upload-artifact@v4
