@@ -1,0 +1,154 @@
+name: Build Kernel
+
+on:
+  workflow_dispatch:
+    inputs:
+      arch:
+        description: '目标架构（x86_64 / arm64 / arm / riscv64）'
+        required: true
+        default: 'x86_64'
+        type: choice
+        options:
+          - x86_64
+          - arm64
+          - arm
+          - riscv64
+      kernel_repo:
+        description: '内核源码仓库 URL'
+        required: true
+        default: 'https://github.com/zen-kernel/zen-kernel.git'
+      kernel_ref:
+        description: '分支或 tag（如 v7.2.6-lqx1 / master / linux-6.12.y）'
+        required: true
+        default: 'v7.2.6-lqx1'
+      config_file:
+        description: '仓库中配置文件路径（如 configs/lqx-x86_64.config）'
+        required: true
+        default: 'configs/lqx-x86_64.config'
+      release_tag:
+        description: '（可选）完成后发布到该 tag 的 Release，留空则不发布'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Show build target
+      run: |
+        echo "Arch:    ${{ github.event.inputs.arch }}"
+        echo "Repo:    ${{ github.event.inputs.kernel_repo }}"
+        echo "Ref:     ${{ github.event.inputs.kernel_ref }}"
+        echo "Config:  ${{ github.event.inputs.config_file }}"
+        echo "Release: ${{ github.event.inputs.release_tag }}"
+
+    - name: Set arch variables
+      id: arch
+      run: |
+        case "${{ github.event.inputs.arch }}" in
+          x86_64|amd64)
+            echo "karch=x86_64"                      >> "$GITHUB_OUTPUT"
+            echo "cross="                            >> "$GITHUB_OUTPUT"
+            echo "cross_pkg="                        >> "$GITHUB_OUTPUT"
+            echo "deb_arch=amd64"                    >> "$GITHUB_OUTPUT"
+            ;;
+          arm64|aarch64)
+            echo "karch=arm64"                       >> "$GITHUB_OUTPUT"
+            echo "cross=aarch64-linux-gnu-"          >> "$GITHUB_OUTPUT"
+            echo "cross_pkg=gcc-aarch64-linux-gnu"   >> "$GITHUB_OUTPUT"
+            echo "deb_arch=arm64"                    >> "$GITHUB_OUTPUT"
+            ;;
+          arm|armhf|armv7)
+            echo "karch=arm"                         >> "$GITHUB_OUTPUT"
+            echo "cross=arm-linux-gnueabihf-"        >> "$GITHUB_OUTPUT"
+            echo "cross_pkg=gcc-arm-linux-gnueabihf" >> "$GITHUB_OUTPUT"
+            echo "deb_arch=armhf"                    >> "$GITHUB_OUTPUT"
+            ;;
+          riscv64)
+            echo "karch=riscv"                       >> "$GITHUB_OUTPUT"
+            echo "cross=riscv64-linux-gnu-"          >> "$GITHUB_OUTPUT"
+            echo "cross_pkg=gcc-riscv64-linux-gnu"   >> "$GITHUB_OUTPUT"
+            echo "deb_arch=riscv64"                  >> "$GITHUB_OUTPUT"
+            ;;
+          *)
+            echo "Unsupported arch: ${{ github.event.inputs.arch }}" >&2
+            exit 1
+            ;;
+        esac
+
+    - name: Free up disk space
+      run: |
+        sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost
+        sudo rm -rf "$AGENT_TOOLSDIRECTORY" || true
+        df -h /
+
+    - name: Install build dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          build-essential libncurses-dev bison flex \
+          libssl-dev libelf-dev libdw-dev elfutils \
+          bc dwarves zstd cpio rsync kmod \
+          debhelper fakeroot git \
+          ${{ steps.arch.outputs.cross_pkg }}
+
+    - name: Verify config file exists
+      run: |
+        if [ ! -f "${{ github.event.inputs.config_file }}" ]; then
+          echo "Config file not found: ${{ github.event.inputs.config_file }}" >&2
+          exit 1
+        fi
+
+    - name: Clone kernel source
+      run: |
+        git clone --depth 1 --branch "${{ github.event.inputs.kernel_ref }}" \
+          "${{ github.event.inputs.kernel_repo }}" kernel-source
+
+    - name: Apply config
+      run: |
+        cd kernel-source
+        cp "../${{ github.event.inputs.config_file }}" .config
+        make ARCH=${{ steps.arch.outputs.karch }} \
+             CROSS_COMPILE=${{ steps.arch.outputs.cross }} \
+             olddefconfig
+
+    - name: Build kernel packages
+      run: |
+        cd kernel-source
+        make ARCH=${{ steps.arch.outputs.karch }} \
+             CROSS_COMPILE=${{ steps.arch.outputs.cross }} \
+             KDEB_OPTS="-a${{ steps.arch.outputs.deb_arch }}" \
+             -j$(nproc) bindeb-pkg
+
+    - name: Collect image and headers .deb
+      run: |
+        mkdir -p dist
+        mv linux-image-*.deb   dist/ 2>/dev/null || true
+        mv linux-headers-*.deb dist/ 2>/dev/null || true
+        echo "---- collected ----"
+        ls -lh dist/
+        test -n "$(ls -A dist/*.deb 2>/dev/null)"
+
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: kernel-deb-${{ github.event.inputs.arch }}
+        path: dist/*.deb
+        if-no-files-found: error
+
+    - name: Publish to GitHub Release
+      if: ${{ github.event.inputs.release_tag != '' }}
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: ${{ github.event.inputs.release_tag }}
+        name: ${{ github.event.inputs.release_tag }}
+        files: dist/*.deb
+        generate_release_notes: true
