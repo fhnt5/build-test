@@ -4,13 +4,22 @@ on:
   workflow_dispatch:
     inputs:
       arch:
-        description: '目标架构（x86_64 / arm64）'
+        description: '目标架构'
         required: true
         default: 'x86_64'
         type: choice
         options:
           - x86_64
           - arm64
+      package_format:
+        description: '打包格式'
+        required: true
+        default: 'deb'
+        type: choice
+        options:
+          - deb
+          - rpm
+          - pkg.zst
       kernel_repo:
         description: '内核源码仓库 URL'
         required: true
@@ -33,9 +42,6 @@ permissions:
 
 jobs:
   build:
-    # 按所选架构分配原生 runner：
-    #   x86_64 -> ubuntu-latest（x86_64）
-    #   arm64  -> ubuntu-24.04-arm（官方 arm64 runner）
     runs-on: ${{ github.event.inputs.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
     timeout-minutes: 360
 
@@ -46,6 +52,7 @@ jobs:
     - name: Show build target
       run: |
         echo "Arch:    ${{ github.event.inputs.arch }}"
+        echo "Format:  ${{ github.event.inputs.package_format }}"
         echo "Repo:    ${{ github.event.inputs.kernel_repo }}"
         echo "Ref:     ${{ github.event.inputs.kernel_ref }}"
         echo "Config:  ${{ github.event.inputs.config_file }}"
@@ -83,7 +90,20 @@ jobs:
           build-essential libncurses-dev bison flex \
           libssl-dev libelf-dev libdw-dev elfutils \
           bc dwarves zstd cpio rsync kmod \
-          debhelper fakeroot git
+          git
+
+        # 按格式安装额外工具
+        case "${{ github.event.inputs.package_format }}" in
+          deb)
+            sudo apt-get install -y debhelper fakeroot
+            ;;
+          rpm)
+            sudo apt-get install -y rpm rpm2cpio cpio
+            ;;
+          pkg.zst)
+            # zstd 已在上面安装
+            ;;
+        esac
 
     - name: Verify config file exists
       run: |
@@ -106,26 +126,53 @@ jobs:
     - name: Build kernel packages
       run: |
         cd kernel-source
-        make ARCH=${{ steps.arch.outputs.karch }} \
-             KDEB_ARCH=${{ steps.arch.outputs.deb_arch }} \
-             KDEB_OPTS="-a${{ steps.arch.outputs.deb_arch }}" \
-             -j$(nproc) bindeb-pkg
+        case "${{ github.event.inputs.package_format }}" in
+          deb)
+            make ARCH=${{ steps.arch.outputs.karch }} \
+                 KDEB_ARCH=${{ steps.arch.outputs.deb_arch }} \
+                 KDEB_OPTS="-a${{ steps.arch.outputs.deb_arch }}" \
+                 DEB_EXCLUDE_PKG="linux-libc-dev linux-image-%-dbg" \
+                 -j$(nproc) bindeb-pkg
+            ;;
+          rpm)
+            make ARCH=${{ steps.arch.outputs.karch }} \
+                 -j$(nproc) binrpm-pkg
+            ;;
+          pkg.zst)
+            make ARCH=${{ steps.arch.outputs.karch }} \
+                 -j$(nproc) tarzst-pkg
+            ;;
+        esac
 
-    - name: Collect image and headers .deb
+    - name: Collect artifacts
       run: |
         mkdir -p dist
-        # 只收集主 image（排除 dbg 包）和 headers
-        find . -maxdepth 1 -type f -name 'linux-image-*.deb' ! -name '*-dbg_*.deb' -exec mv {} dist/ \;
-        find . -maxdepth 1 -type f -name 'linux-headers-*.deb' -exec mv {} dist/ \;
+        cd kernel-source
+
+        case "${{ github.event.inputs.package_format }}" in
+          deb)
+            # 只收集 image（排除 dbg）和 headers
+            find .. -maxdepth 1 -type f -name 'linux-image-*.deb' ! -name '*-dbg_*.deb' -exec mv {} ../dist/ \;
+            find .. -maxdepth 1 -type f -name 'linux-headers-*.deb' -exec mv {} ../dist/ \;
+            ;;
+          rpm)
+            find .. -maxdepth 1 -type f -name 'kernel-*.rpm' -exec mv {} ../dist/ \;
+            find .. -maxdepth 1 -type f -name 'linux-*.rpm' -exec mv {} ../dist/ \;
+            ;;
+          pkg.zst)
+            find .. -maxdepth 1 -type f -name 'linux-*.tar.zst' -exec mv {} ../dist/ \;
+            ;;
+        esac
+
         echo "---- collected ----"
-        ls -lh dist/
-        test -n "$(find dist -maxdepth 1 -name '*.deb' -print -quit)"
+        ls -lh ../dist/
+        test -n "$(find ../dist -maxdepth 1 -type f -print -quit)"
 
     - name: Upload artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: kernel-deb-${{ github.event.inputs.arch }}
-        path: dist/*.deb
+        name: kernel-${{ github.event.inputs.package_format }}-${{ github.event.inputs.arch }}
+        path: dist/*
         if-no-files-found: error
 
     - name: Publish to GitHub Release
@@ -134,5 +181,5 @@ jobs:
       with:
         tag_name: ${{ github.event.inputs.release_tag }}
         name: ${{ github.event.inputs.release_tag }}
-        files: dist/*.deb
+        files: dist/*
         generate_release_notes: true
