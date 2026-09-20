@@ -3,14 +3,33 @@ name: Build Kernel
 on:
   workflow_dispatch:
     inputs:
-      archs:
-        description: '目标架构，逗号分隔（x86_64,arm64）'
-        required: true
-        default: 'x86_64'
-      formats:
-        description: '打包格式，逗号分隔（deb,rpm,pkg.tar.zst）'
-        required: true
-        default: 'deb'
+      # ─────────── x86_64 ───────────
+      x86_64_deb:
+        description: 'x86_64  ›  deb'
+        type: boolean
+        default: true
+      x86_64_rpm:
+        description: 'x86_64  ›  rpm'
+        type: boolean
+        default: false
+      x86_64_pkg:
+        description: 'x86_64  ›  pkg.tar.zst'
+        type: boolean
+        default: false
+      # ─────────── arm64 ───────────
+      arm64_deb:
+        description: 'arm64   ›  deb'
+        type: boolean
+        default: false
+      arm64_rpm:
+        description: 'arm64   ›  rpm'
+        type: boolean
+        default: false
+      arm64_pkg:
+        description: 'arm64   ›  pkg.tar.zst（注意：Arch Linux ARM 的 PKGBUILD 与官方不同，可能失败）'
+        type: boolean
+        default: false
+      # ─────────── 通用 ───────────
       kernel_repo:
         description: '内核源码仓库 URL'
         required: true
@@ -33,33 +52,41 @@ permissions:
 
 jobs:
   # ------------------------------------------------------------------
-  # 作业 1：解析输入，生成动态矩阵
+  # 作业 1：根据勾选生成动态矩阵
   # ------------------------------------------------------------------
   prepare:
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.gen.outputs.matrix }}
+      count: ${{ steps.gen.outputs.count }}
     steps:
       - name: Generate build matrix
         id: gen
         run: |
-          # 1. 把 archs 和 formats 拆成 JSON 数组
-          ARCHS=$(echo '${{ github.event.inputs.archs }}' \
-            | jq -c '[split(",")[] | gsub("^\\s+|\\s+$";"") | select(length>0)]')
-          FORMATS=$(echo '${{ github.event.inputs.formats }}' \
-            | jq -c '[split(",")[] | gsub("^\\s+|\\s+$";"") | select(length>0)]')
+          MATRIX='{"include":[]}'
+          add() {
+            MATRIX=$(echo "$MATRIX" | jq -c --arg a "$1" --arg f "$2" \
+              '.include += [{arch:$a, format:$f}]')
+          }
 
-          echo "ARCHS   = $ARCHS"
-          echo "FORMATS = $FORMATS"
+          if [ "${{ inputs.x86_64_deb }}" = "true" ]; then add x86_64 deb;        fi
+          if [ "${{ inputs.x86_64_rpm }}" = "true" ]; then add x86_64 rpm;        fi
+          if [ "${{ inputs.x86_64_pkg }}" = "true" ]; then add x86_64 pkg.tar.zst; fi
+          if [ "${{ inputs.arm64_deb }}"  = "true" ]; then add arm64  deb;        fi
+          if [ "${{ inputs.arm64_rpm }}"  = "true" ]; then add arm64  rpm;        fi
+          if [ "${{ inputs.arm64_pkg }}"  = "true" ]; then add arm64  pkg.tar.zst; fi
 
-          # 2. 组合成 matrix.include 格式的 JSON 数组
-          MATRIX=$(jq -cn \
-            --argjson archs "$ARCHS" \
-            --argjson formats "$FORMATS" \
-            '{include: [ $archs[] as $a | $formats[] as $f | {arch: $a, format: $f} ]}')
+          COUNT=$(echo "$MATRIX" | jq '.include | length')
+          echo "MATRIX = $MATRIX"
+          echo "COUNT  = $COUNT"
 
-          echo "MATRIX  = $MATRIX"
+          if [ "$COUNT" -eq 0 ]; then
+            echo "No build target selected. Please tick at least one architecture/format combination." >&2
+            exit 1
+          fi
+
           echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+          echo "count=$COUNT"   >> "$GITHUB_OUTPUT"
 
   # ------------------------------------------------------------------
   # 作业 2：按矩阵构建
@@ -80,9 +107,9 @@ jobs:
       run: |
         echo "Arch:    ${{ matrix.arch }}"
         echo "Format:  ${{ matrix.format }}"
-        echo "Repo:    ${{ github.event.inputs.kernel_repo }}"
-        echo "Ref:     ${{ github.event.inputs.kernel_ref }}"
-        echo "Config:  ${{ github.event.inputs.config_file }}"
+        echo "Repo:    ${{ inputs.kernel_repo }}"
+        echo "Ref:     ${{ inputs.kernel_ref }}"
+        echo "Config:  ${{ inputs.config_file }}"
         echo "Runner:  ${{ runner.os }} / ${{ runner.arch }}"
 
     - name: Set arch variables
@@ -109,9 +136,6 @@ jobs:
         sudo rm -rf "$AGENT_TOOLSDIRECTORY" || true
         df -h /
 
-    # ------------------------------------------------------------------
-    # 安装依赖（按格式区分）
-    # ------------------------------------------------------------------
     - name: Install build dependencies
       run: |
         sudo apt-get update
@@ -129,8 +153,6 @@ jobs:
             sudo apt-get install -y rpm rpm2cpio cpio
             ;;
           pkg.tar.zst)
-            # Arch 打包需要 pacman + makepkg 工具链
-            # Ubuntu 没有官方 makepkg，使用第三方 pacman-package-manager
             sudo apt-get install -y \
               pacman-package-manager arch-install-scripts \
               fakeroot libarchive-tools
@@ -139,25 +161,22 @@ jobs:
 
     - name: Verify config file exists
       run: |
-        if [ ! -f "${{ github.event.inputs.config_file }}" ]; then
-          echo "Config file not found: ${{ github.event.inputs.config_file }}" >&2
+        if [ ! -f "${{ inputs.config_file }}" ]; then
+          echo "Config file not found: ${{ inputs.config_file }}" >&2
           exit 1
         fi
 
     - name: Clone kernel source
       run: |
-        git clone --depth 1 --branch "${{ github.event.inputs.kernel_ref }}" \
-          "${{ github.event.inputs.kernel_repo }}" kernel-source
+        git clone --depth 1 --branch "${{ inputs.kernel_ref }}" \
+          "${{ inputs.kernel_repo }}" kernel-source
 
     - name: Apply config
       run: |
         cd kernel-source
-        cp "../${{ github.event.inputs.config_file }}" .config
+        cp "../${{ inputs.config_file }}" .config
         make ARCH=${{ steps.arch.outputs.karch }} olddefconfig
 
-    # ------------------------------------------------------------------
-    # 构建：deb / rpm / pkg.tar.zst 三条分支
-    # ------------------------------------------------------------------
     - name: Build kernel packages
       run: |
         cd kernel-source
@@ -174,30 +193,21 @@ jobs:
                  -j$(nproc) binrpm-pkg
             ;;
           pkg.tar.zst)
-            # 用 Arch PKGBUILD + makepkg 生成真正的 .pkg.tar.zst
-            # makepkg 不能以 root 运行，必须用普通用户
             sudo useradd -m builder 2>/dev/null || true
 
-            # 拉取 Arch 官方 linux 包的 PKGBUILD 作为模板
             pkgctl repo clone --protocol=https linux 2>/dev/null || {
               git clone --depth 1 https://gitlab.archlinux.org/archlinux/packaging/packages/linux.git
             }
 
             cd linux
-
-            # 替换 pkgbase，使用我们的 config
             sed -i 's/^pkgbase=.*/pkgbase=linux-custom/' PKGBUILD
-            cp "../../${{ github.event.inputs.config_file }}" config
+            cp "../../${{ inputs.config_file }}" config
 
-            # 交给 builder 用户执行 makepkg
             chown -R builder:builder .
             sudo -u builder makepkg -s --noconfirm --nodeps
             ;;
         esac
 
-    # ------------------------------------------------------------------
-    # 收集产物
-    # ------------------------------------------------------------------
     - name: Collect artifacts
       run: |
         mkdir -p dist
@@ -231,17 +241,30 @@ jobs:
         path: dist/*
         if-no-files-found: error
 
-    # ------------------------------------------------------------------
-    # 收集所有作业的产物，统一发布 Release（只在一个矩阵作业里执行一次）
-    # ------------------------------------------------------------------
-    - name: Publish to GitHub Release
-      if: >
-        github.event.inputs.release_tag != '' &&
-        matrix.arch == 'x86_64' &&
-        matrix.format == 'deb'
-      uses: softprops/action-gh-release@v2
-      with:
-        tag_name: ${{ github.event.inputs.release_tag }}
-        name: ${{ github.event.inputs.release_tag }}
-        files: dist/*
-        generate_release_notes: true
+  # ------------------------------------------------------------------
+  # 作业 3：发布 Release（独立 job，不依赖特定矩阵项）
+  # ------------------------------------------------------------------
+  publish:
+    needs: build
+    if: inputs.release_tag != ''
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: kernel-*
+          merge-multiple: true
+
+      - name: List collected files
+        run: |
+          ls -lh dist/
+          test -n "$(find dist -maxdepth 1 -type f -print -quit)"
+
+      - name: Publish to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.release_tag }}
+          name: ${{ inputs.release_tag }}
+          files: dist/*
+          generate_release_notes: true
