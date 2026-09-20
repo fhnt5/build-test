@@ -3,29 +3,20 @@ name: Build Kernel
 on:
   workflow_dispatch:
     inputs:
-      arch:
-        description: '目标架构'
+      archs:
+        description: '目标架构，逗号分隔（x86_64,arm64）'
         required: true
         default: 'x86_64'
-        type: choice
-        options:
-          - x86_64
-          - arm64
-      package_format:
-        description: '打包格式'
+      formats:
+        description: '打包格式，逗号分隔（deb,rpm,pkg.tar.zst）'
         required: true
         default: 'deb'
-        type: choice
-        options:
-          - deb
-          - rpm
-          - pkg.zst
       kernel_repo:
         description: '内核源码仓库 URL'
         required: true
         default: 'https://github.com/zen-kernel/zen-kernel.git'
       kernel_ref:
-        description: '分支或 tag（如 v7.2.6-lqx1 / master / linux-6.12.y）'
+        description: '分支或 tag（如 v7.2.6-lqx1 / master）'
         required: true
         default: 'v7.2.6-lqx1'
       config_file:
@@ -41,9 +32,45 @@ permissions:
   contents: write
 
 jobs:
+  # ------------------------------------------------------------------
+  # 作业 1：解析输入，生成动态矩阵
+  # ------------------------------------------------------------------
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.gen.outputs.matrix }}
+    steps:
+      - name: Generate build matrix
+        id: gen
+        run: |
+          # 1. 把 archs 和 formats 拆成 JSON 数组
+          ARCHS=$(echo '${{ github.event.inputs.archs }}' \
+            | jq -c '[split(",")[] | gsub("^\\s+|\\s+$";"") | select(length>0)]')
+          FORMATS=$(echo '${{ github.event.inputs.formats }}' \
+            | jq -c '[split(",")[] | gsub("^\\s+|\\s+$";"") | select(length>0)]')
+
+          echo "ARCHS   = $ARCHS"
+          echo "FORMATS = $FORMATS"
+
+          # 2. 组合成 matrix.include 格式的 JSON 数组
+          MATRIX=$(jq -cn \
+            --argjson archs "$ARCHS" \
+            --argjson formats "$FORMATS" \
+            '{include: [ $archs[] as $a | $formats[] as $f | {arch: $a, format: $f} ]}')
+
+          echo "MATRIX  = $MATRIX"
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+
+  # ------------------------------------------------------------------
+  # 作业 2：按矩阵构建
+  # ------------------------------------------------------------------
   build:
-    runs-on: ${{ github.event.inputs.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
+    needs: prepare
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
     timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
 
     steps:
     - name: Checkout repository
@@ -51,18 +78,17 @@ jobs:
 
     - name: Show build target
       run: |
-        echo "Arch:    ${{ github.event.inputs.arch }}"
-        echo "Format:  ${{ github.event.inputs.package_format }}"
+        echo "Arch:    ${{ matrix.arch }}"
+        echo "Format:  ${{ matrix.format }}"
         echo "Repo:    ${{ github.event.inputs.kernel_repo }}"
         echo "Ref:     ${{ github.event.inputs.kernel_ref }}"
         echo "Config:  ${{ github.event.inputs.config_file }}"
-        echo "Release: ${{ github.event.inputs.release_tag }}"
         echo "Runner:  ${{ runner.os }} / ${{ runner.arch }}"
 
     - name: Set arch variables
       id: arch
       run: |
-        case "${{ github.event.inputs.arch }}" in
+        case "${{ matrix.arch }}" in
           x86_64|amd64)
             echo "karch=x86_64"    >> "$GITHUB_OUTPUT"
             echo "deb_arch=amd64"  >> "$GITHUB_OUTPUT"
@@ -72,7 +98,7 @@ jobs:
             echo "deb_arch=arm64"  >> "$GITHUB_OUTPUT"
             ;;
           *)
-            echo "Unsupported arch: ${{ github.event.inputs.arch }}" >&2
+            echo "Unsupported arch: ${{ matrix.arch }}" >&2
             exit 1
             ;;
         esac
@@ -83,6 +109,9 @@ jobs:
         sudo rm -rf "$AGENT_TOOLSDIRECTORY" || true
         df -h /
 
+    # ------------------------------------------------------------------
+    # 安装依赖（按格式区分）
+    # ------------------------------------------------------------------
     - name: Install build dependencies
       run: |
         sudo apt-get update
@@ -90,18 +119,21 @@ jobs:
           build-essential libncurses-dev bison flex \
           libssl-dev libelf-dev libdw-dev elfutils \
           bc dwarves zstd cpio rsync kmod \
-          git
+          git jq
 
-        # 按格式安装额外工具
-        case "${{ github.event.inputs.package_format }}" in
+        case "${{ matrix.format }}" in
           deb)
             sudo apt-get install -y debhelper fakeroot
             ;;
           rpm)
             sudo apt-get install -y rpm rpm2cpio cpio
             ;;
-          pkg.zst)
-            # zstd 已在上面安装
+          pkg.tar.zst)
+            # Arch 打包需要 pacman + makepkg 工具链
+            # Ubuntu 没有官方 makepkg，使用第三方 pacman-package-manager
+            sudo apt-get install -y \
+              pacman-package-manager arch-install-scripts \
+              fakeroot libarchive-tools
             ;;
         esac
 
@@ -123,10 +155,13 @@ jobs:
         cp "../${{ github.event.inputs.config_file }}" .config
         make ARCH=${{ steps.arch.outputs.karch }} olddefconfig
 
+    # ------------------------------------------------------------------
+    # 构建：deb / rpm / pkg.tar.zst 三条分支
+    # ------------------------------------------------------------------
     - name: Build kernel packages
       run: |
         cd kernel-source
-        case "${{ github.event.inputs.package_format }}" in
+        case "${{ matrix.format }}" in
           deb)
             make ARCH=${{ steps.arch.outputs.karch }} \
                  KDEB_ARCH=${{ steps.arch.outputs.deb_arch }} \
@@ -138,45 +173,72 @@ jobs:
             make ARCH=${{ steps.arch.outputs.karch }} \
                  -j$(nproc) binrpm-pkg
             ;;
-          pkg.zst)
-            make ARCH=${{ steps.arch.outputs.karch }} \
-                 -j$(nproc) tarzst-pkg
+          pkg.tar.zst)
+            # 用 Arch PKGBUILD + makepkg 生成真正的 .pkg.tar.zst
+            # makepkg 不能以 root 运行，必须用普通用户
+            sudo useradd -m builder 2>/dev/null || true
+
+            # 拉取 Arch 官方 linux 包的 PKGBUILD 作为模板
+            pkgctl repo clone --protocol=https linux 2>/dev/null || {
+              git clone --depth 1 https://gitlab.archlinux.org/archlinux/packaging/packages/linux.git
+            }
+
+            cd linux
+
+            # 替换 pkgbase，使用我们的 config
+            sed -i 's/^pkgbase=.*/pkgbase=linux-custom/' PKGBUILD
+            cp "../../${{ github.event.inputs.config_file }}" config
+
+            # 交给 builder 用户执行 makepkg
+            chown -R builder:builder .
+            sudo -u builder makepkg -s --noconfirm --nodeps
             ;;
         esac
 
+    # ------------------------------------------------------------------
+    # 收集产物
+    # ------------------------------------------------------------------
     - name: Collect artifacts
       run: |
         mkdir -p dist
-        cd kernel-source
 
-        case "${{ github.event.inputs.package_format }}" in
+        case "${{ matrix.format }}" in
           deb)
-            # 只收集 image（排除 dbg）和 headers
-            find .. -maxdepth 1 -type f -name 'linux-image-*.deb' ! -name '*-dbg_*.deb' -exec mv {} ../dist/ \;
-            find .. -maxdepth 1 -type f -name 'linux-headers-*.deb' -exec mv {} ../dist/ \;
+            find kernel-source/.. -maxdepth 1 -type f -name 'linux-image-*.deb' \
+              ! -name '*-dbg_*.deb' -exec mv {} dist/ \;
+            find kernel-source/.. -maxdepth 1 -type f -name 'linux-headers-*.deb' \
+              -exec mv {} dist/ \;
             ;;
           rpm)
-            find .. -maxdepth 1 -type f -name 'kernel-*.rpm' -exec mv {} ../dist/ \;
-            find .. -maxdepth 1 -type f -name 'linux-*.rpm' -exec mv {} ../dist/ \;
+            find kernel-source/.. -maxdepth 1 -type f \
+              \( -name 'kernel-*.rpm' -o -name 'linux-*.rpm' \) \
+              -exec mv {} dist/ \;
             ;;
-          pkg.zst)
-            find .. -maxdepth 1 -type f -name 'linux-*.tar.zst' -exec mv {} ../dist/ \;
+          pkg.tar.zst)
+            find kernel-source/linux -maxdepth 1 -type f -name '*.pkg.tar.zst' \
+              -exec mv {} dist/ \;
             ;;
         esac
 
         echo "---- collected ----"
-        ls -lh ../dist/
-        test -n "$(find ../dist -maxdepth 1 -type f -print -quit)"
+        ls -lh dist/
+        test -n "$(find dist -maxdepth 1 -type f -print -quit)"
 
     - name: Upload artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: kernel-${{ github.event.inputs.package_format }}-${{ github.event.inputs.arch }}
+        name: kernel-${{ matrix.format }}-${{ matrix.arch }}
         path: dist/*
         if-no-files-found: error
 
+    # ------------------------------------------------------------------
+    # 收集所有作业的产物，统一发布 Release（只在一个矩阵作业里执行一次）
+    # ------------------------------------------------------------------
     - name: Publish to GitHub Release
-      if: ${{ github.event.inputs.release_tag != '' }}
+      if: >
+        github.event.inputs.release_tag != '' &&
+        matrix.arch == 'x86_64' &&
+        matrix.format == 'deb'
       uses: softprops/action-gh-release@v2
       with:
         tag_name: ${{ github.event.inputs.release_tag }}
