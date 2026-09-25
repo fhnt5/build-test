@@ -29,6 +29,36 @@ on:
         description: 'arm64   ›  pkg.tar.zst（使用 Arch Linux ARM 容器）'
         type: boolean
         default: false
+      # ─────────── 内核配置（下拉）───────────
+      config_choice:
+        description: '内核配置来源：default = 内核 defconfig；configs/* = 仓库文件；其他 = 发行版'
+        type: choice
+        required: true
+        default: 'default'
+        options:
+          - 'default'
+          - 'configs/G40_45.config'
+          - 'configs/default_x86_64.config'
+          - 'alma'
+          - 'alpine'
+          - 'arch'
+          - 'centos'
+          - 'debian'
+          - 'fedora'
+          - 'gentoo'
+          - 'kali'
+          - 'manjaro'
+          - 'nixos'
+          - 'opensuse'
+          - 'rhel'
+          - 'rocky'
+          - 'ubuntu'
+          - 'void'
+      config_custom:
+        description: '（可选）自定义配置：仓库内路径 / http(s):// URL。填了则覆盖上面的选择'
+        type: string
+        required: false
+        default: ''
       # ─────────── 通用 ───────────
       kernel_repo:
         description: '内核源码仓库 URL'
@@ -38,10 +68,6 @@ on:
         description: '分支或 tag（如 v7.2.6-lqx1 / master）'
         required: true
         default: 'v7.2.6-lqx1'
-      config_file:
-        description: '仓库中配置文件路径（如 configs/G40_45.config）'
-        required: true
-        default: 'configs/G40_45.config'
       release_tag:
         description: '（可选）完成后发布到该 tag 的 Release，留空则不发布'
         required: false
@@ -105,12 +131,13 @@ jobs:
 
     - name: Show build target
       run: |
-        echo "Arch:    ${{ matrix.arch }}"
-        echo "Format:  ${{ matrix.format }}"
-        echo "Repo:    ${{ inputs.kernel_repo }}"
-        echo "Ref:     ${{ inputs.kernel_ref }}"
-        echo "Config:  ${{ inputs.config_file }}"
-        echo "Runner:  ${{ runner.os }} / ${{ runner.arch }}"
+        echo "Arch:          ${{ matrix.arch }}"
+        echo "Format:        ${{ matrix.format }}"
+        echo "Repo:          ${{ inputs.kernel_repo }}"
+        echo "Ref:           ${{ inputs.kernel_ref }}"
+        echo "Config choice: ${{ inputs.config_choice }}"
+        echo "Config custom: ${{ inputs.config_custom }}"
+        echo "Runner:        ${{ runner.os }} / ${{ runner.arch }}"
 
     - name: Set arch variables
       id: arch
@@ -143,7 +170,7 @@ jobs:
           build-essential libncurses-dev bison flex \
           libssl-dev libelf-dev libdw-dev elfutils \
           bc dwarves zstd cpio rsync kmod \
-          git jq
+          git jq curl
 
         case "${{ matrix.format }}" in
           deb)
@@ -154,23 +181,100 @@ jobs:
             ;;
         esac
 
-    - name: Verify config file exists
-      run: |
-        if [ ! -f "${{ inputs.config_file }}" ]; then
-          echo "Config file not found: ${{ inputs.config_file }}" >&2
-          exit 1
-        fi
-
     - name: Clone kernel source
       run: |
         git clone --depth 1 --branch "${{ inputs.kernel_ref }}" \
           "${{ inputs.kernel_repo }}" kernel-source
 
-    - name: Apply config
+    # ==================================================================
+    # 解析配置来源 + 应用到 .config
+    # ==================================================================
+    - name: Resolve and apply config
       run: |
+        CHOICE="${{ inputs.config_choice }}"
+        CUSTOM="${{ inputs.config_custom }}"
+        KARCH="${{ steps.arch.outputs.karch }}"
+        CONFIG_OUT="/tmp/kernel.config"
+
+        # 自定义优先
+        if [ -n "$CUSTOM" ]; then
+          echo "==> config_custom provided, overriding choice: $CUSTOM"
+          CHOICE="$CUSTOM"
+        fi
+
+        # 判定配置来源
+        if [ -z "$CHOICE" ] || [ "$CHOICE" = "default" ]; then
+          echo "==> Source: kernel defconfig (make defconfig)"
+          cd kernel-source
+          make ARCH="$KARCH" defconfig
+          cp .config "$CONFIG_OUT"
+          cd ..
+          echo "CONFIG_SOURCE=kernel defconfig" >> "$GITHUB_ENV"
+
+        elif [[ "$CHOICE" == http://* ]] || [[ "$CHOICE" == https://* ]]; then
+          echo "==> Source: download from URL: $CHOICE"
+          curl -fSL "$CHOICE" -o "$CONFIG_OUT"
+          echo "CONFIG_SOURCE=$CHOICE" >> "$GITHUB_ENV"
+
+        elif [ -f "$CHOICE" ]; then
+          echo "==> Source: repo file: $CHOICE"
+          cp "$CHOICE" "$CONFIG_OUT"
+          echo "CONFIG_SOURCE=$CHOICE" >> "$GITHUB_ENV"
+
+        elif [ -f "configs/$CHOICE" ]; then
+          echo "==> Source: repo file: configs/$CHOICE"
+          cp "configs/$CHOICE" "$CONFIG_OUT"
+          echo "CONFIG_SOURCE=configs/$CHOICE" >> "$GITHUB_ENV"
+
+        else
+          # 视为发行版名，从下面这张 URL 表里查
+          # 注意：这些 URL 是 best-effort，上游随时可能改动路径或分支；
+          #       如果某个发行版拉取失败，请更新 URL 或改用 config_custom。
+          case "$CHOICE" in
+            alma)     URL='https://git.almalinux.org/rpms/kernel/-/raw/c9/f/kernel-x86_64-fedora.config' ;;
+            alpine)   URL='https://gitlab.alpinelinux.org/alpine/aports/-/raw/master/main/linux-lts/config-lts.x86_64' ;;
+            arch)     URL='https://gitlab.archlinux.org/archlinux/packaging/packages/linux/-/raw/main/config' ;;
+            centos)   URL='https://gitlab.com/redhat/centos-stream/rpms/kernel/-/raw/c9s/f/kernel-x86_64-fedora.config' ;;
+            debian)   URL='https://salsa.debian.org/kernel-team/linux/-/raw/debian/latest/debian/config/config' ;;
+            fedora)   URL='https://src.fedoraproject.org/rpms/kernel/raw/rawhide/f/kernel-x86_64-fedora.config' ;;
+            gentoo)   URL='https://gitweb.gentoo.org/proj/gentoo-kernel.git/plain/default_config' ;;
+            kali)     URL='https://gitlab.com/kalilinux/packages/linux/-/raw/kali/master/debian/config/config' ;;
+            manjaro)  URL='https://gitlab.manjaro.org/packages/core/linux/-/raw/master/config' ;;
+            nixos)    URL='https://raw.githubusercontent.com/NixOS/nixpkgs/master/pkgs/os-specific/linux/kernel/common-config.nix' ;;
+            opensuse) URL='https://raw.githubusercontent.com/openSUSE/kernel-source/master/config/x86_64/default' ;;
+            rhel)     URL='https://gitlab.com/redhat/centos-stream/rpms/kernel/-/raw/c9s/f/kernel-x86_64-fedora.config' ;;
+            rocky)    URL='https://git.rockylinux.org/rocky/kernel/-/raw/r9/f/kernel-x86_64-fedora.config' ;;
+            ubuntu)   URL='https://git.launchpad.net/~ubuntu-kernel/ubuntu/+source/linux/+git/jammy/plain/debian.master/config/amd64/config.flavour.generic' ;;
+            void)     URL='https://raw.githubusercontent.com/void-linux/void-packages/master/srcpkgs/linux/files/x86_64-dotconfig' ;;
+            *)
+              echo "Unknown config_choice: $CHOICE" >&2
+              echo "Pass a repo path (configs/...), an http(s) URL via config_custom, or one of:" >&2
+              echo "  alma alpine arch centos debian fedora gentoo kali manjaro nixos opensuse rhel rocky ubuntu void" >&2
+              exit 1
+              ;;
+          esac
+          echo "==> Source: distro '$CHOICE' -> $URL"
+          if ! curl -fSL "$URL" -o "$CONFIG_OUT"; then
+            echo "ERROR: failed to download $CHOICE config from $URL" >&2
+            echo "The URL may be stale. Update it in the workflow file, or use config_custom." >&2
+            exit 1
+          fi
+          echo "CONFIG_SOURCE=$CHOICE ($URL)" >> "$GITHUB_ENV"
+        fi
+
+        # 快速校验
+        if [ ! -s "$CONFIG_OUT" ]; then
+          echo "ERROR: resolved config is empty: $CONFIG_OUT" >&2
+          exit 1
+        fi
+        echo "---- config preview (head) ----"
+        head -5 "$CONFIG_OUT"
+        echo "---- config lines: $(wc -l < "$CONFIG_OUT") ----"
+
+        # 应用到 kernel-source，跑 olddefconfig 适配架构差异
         cd kernel-source
-        cp "../${{ inputs.config_file }}" .config
-        make ARCH=${{ steps.arch.outputs.karch }} olddefconfig
+        cp "$CONFIG_OUT" .config
+        make ARCH="$KARCH" olddefconfig
 
     - name: Build kernel packages (deb / rpm)
       if: matrix.format != 'pkg.tar.zst'
@@ -187,7 +291,7 @@ jobs:
           rpm)
             # KCFLAGS="-g0" 阻止生成 debuginfo 文件，
             # 避免 6.x 之后 binrpm-pkg 报 "Installed (but unpackaged) file(s) found"
-            # RPMOPTS 将 _topdir 指向工作目录下的 rpmbuild/，确保产物可被收集
+            # RPMOPTS 把 _topdir 指向工作目录，确保产物可被收集
             make ARCH=${{ steps.arch.outputs.karch }} \
                  KCFLAGS="-g0" \
                  RPM_BUILD_NCPUS=$(nproc) \
@@ -197,24 +301,22 @@ jobs:
         esac
 
     # ==================================================================
-    # pkg.tar.zst —— 用用户 config 覆盖 PKGBUILD 自带 config
+    # pkg.tar.zst —— 用 sed 直接改 PKGBUILD 里的 config 复制行
     # ==================================================================
     - name: Build kernel packages (pkg.tar.zst)
       if: matrix.format == 'pkg.tar.zst'
       run: |
-        # 1) 选择 Arch 容器镜像
         case "${{ matrix.arch }}" in
           x86_64) ARCH_IMAGE="archlinux:latest" ;;
           arm64)  ARCH_IMAGE="menci/archlinuxarm:base-devel" ;;
         esac
         echo "Using Arch container image: $ARCH_IMAGE"
 
-        # 2) 临时目录：in 送进容器，out 从容器取出
         STAGE="$(mktemp -d)"
         mkdir -p "$STAGE/in" "$STAGE/out"
-        cp "${{ inputs.config_file }}" "$STAGE/in/kernel.config"
+        # 这里用的是上面 resolve 步骤生成的最终 config
+        cp /tmp/kernel.config "$STAGE/in/kernel.config"
 
-        # 3) 构建脚本（在容器内跑）
         cat > "$STAGE/in/build.sh" <<'BUILD_EOF'
         set -e
 
@@ -229,12 +331,6 @@ jobs:
         useradd -m builder
         chmod 644 /tmp/kernel.config
 
-        # 全程在容器内部文件系统里构建，不碰任何 bind mount。
-        # 关键点：
-        #  - Arch 官方 PKGBUILD 是 x86_64 专用，prepare() 里按 $CARCH 去
-        #    复制 config.$CARCH；必须把用户的 config 覆盖成对应文件名。
-        #  - 替换后 sha256sums/b2sums 不再匹配，用 --skipinteg 一次性跳过
-        #    校验和与 PGP 校验。
         su - builder -c '
         set -e
         cd ~
@@ -244,19 +340,24 @@ jobs:
         cd arch-pkg
         sed -i "s/^pkgbase=.*/pkgbase=linux-custom/" PKGBUILD
 
-        # 按架构覆盖 PKGBUILD 期望的 config 文件名
-        case "$(uname -m)" in
-          aarch64) cp /tmp/kernel.config config.aarch64 ;;
-          x86_64)  cp /tmp/kernel.config config.x86_64  ;;
-        esac
-        # 兜底：再放一份 config，防止个别 PKGBUILD 直接引用裸名
+        # 官方 PKGBUILD 的 prepare() 里写死了 cp ../config.$CARCH .config，
+        # 它从 $srcdir 找 config.aarch64 / config.x86_64。
+        # aarch64 版本官方根本没提供，所以 arm64 必然失败；
+        # x86_64 虽然能过，但用的其实是官方 config 而不是用户输入的。
+        # 直接把那一行替换成从 /tmp/kernel.config 复制，一次解决两个问题。
+        echo "---- PKGBUILD config line (before) ----"
+        grep -nE "cp[[:space:]]+.*config" PKGBUILD || true
+        sed -i -E "s|cp[[:space:]]+\.\./config\.[^[:space:]]+[[:space:]]+\.config|cp /tmp/kernel.config .config|" PKGBUILD
+        echo "---- PKGBUILD config line (after) ----"
+        grep -nE "cp[[:space:]]+.*config" PKGBUILD || true
+
+        # 兜底：也放一份裸名 config
         cp /tmp/kernel.config config
 
         makepkg -s --noconfirm --nodeps --ignorearch --skipinteg
         '
         BUILD_EOF
 
-        # 4) 启动后台容器，送脚本和 config 进去，执行构建
         CID=$(docker run -d "$ARCH_IMAGE" sleep infinity)
         echo "Container: $CID"
 
@@ -264,16 +365,11 @@ jobs:
         docker cp "$STAGE/in/kernel.config" "$CID:/tmp/kernel.config"
         docker exec "$CID" bash /tmp/build.sh
 
-        # 5) 从容器把产物取出来
         docker cp "$CID:/home/builder/arch-pkg/." "$STAGE/out/"
-
-        # 6) 清理容器
         docker rm -f "$CID"
 
-        # 7) 修正属主（容器内 builder UID 与 runner 用户不同）
         sudo chown -R "$(id -u):$(id -g)" "$STAGE/out"
 
-        # 8) 挑出 .pkg.tar.zst 放到 dist/
         mkdir -p dist
         find "$STAGE/out" -maxdepth 1 -type f -name '*.pkg.tar.zst' \
           -exec mv {} dist/ \;
@@ -295,7 +391,6 @@ jobs:
               -exec mv {} dist/ \;
             ;;
           rpm)
-            # RPMOPTS 已把 _topdir 指向 $PWD/rpmbuild，产物在 kernel-source/rpmbuild/RPMS/ 下
             find kernel-source/rpmbuild/RPMS -type f -name '*.rpm' \
               -exec mv {} dist/ \;
             ;;
