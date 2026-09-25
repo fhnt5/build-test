@@ -197,7 +197,7 @@ jobs:
         esac
 
     # ==================================================================
-    # pkg.tar.zst —— 不挂载、docker cp 双向传输，全程在容器内部 fs 构建
+    # pkg.tar.zst —— 用用户 config 覆盖 PKGBUILD 自带 config
     # ==================================================================
     - name: Build kernel packages (pkg.tar.zst)
       if: matrix.format == 'pkg.tar.zst'
@@ -230,8 +230,11 @@ jobs:
         chmod 644 /tmp/kernel.config
 
         # 全程在容器内部文件系统里构建，不碰任何 bind mount。
-        # --skippgpcheck：跳过上游源码的 GPG 签名验证，
-        #   避免因缺少 38DBBDC86092693E / B8AC08600F108CDF 公钥而失败。
+        # 关键点：
+        #  - Arch 官方 PKGBUILD 是 x86_64 专用，prepare() 里按 $CARCH 去
+        #    复制 config.$CARCH；必须把用户的 config 覆盖成对应文件名。
+        #  - 替换后 sha256sums/b2sums 不再匹配，用 --skipinteg 一次性跳过
+        #    校验和与 PGP 校验。
         su - builder -c '
         set -e
         cd ~
@@ -240,8 +243,16 @@ jobs:
           arch-pkg
         cd arch-pkg
         sed -i "s/^pkgbase=.*/pkgbase=linux-custom/" PKGBUILD
+
+        # 按架构覆盖 PKGBUILD 期望的 config 文件名
+        case "$(uname -m)" in
+          aarch64) cp /tmp/kernel.config config.aarch64 ;;
+          x86_64)  cp /tmp/kernel.config config.x86_64  ;;
+        esac
+        # 兜底：再放一份 config，防止个别 PKGBUILD 直接引用裸名
         cp /tmp/kernel.config config
-        makepkg -s --noconfirm --nodeps --ignorearch --skippgpcheck
+
+        makepkg -s --noconfirm --nodeps --ignorearch --skipinteg
         '
         BUILD_EOF
 
