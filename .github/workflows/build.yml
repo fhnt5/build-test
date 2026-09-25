@@ -38,7 +38,6 @@ on:
         options:
           - 'default'
           - 'configs/G40_45.config'
-          - 'configs/default_x86_64.config'
           - 'alma'
           - 'alpine'
           - 'arch'
