@@ -26,7 +26,7 @@ on:
         type: boolean
         default: false
       arm64_pkg:
-        description: 'arm64   ›  pkg.tar.zst（注意：Arch Linux ARM 的 PKGBUILD 与官方不同，可能失败）'
+        description: 'arm64   ›  pkg.tar.zst（使用 Arch Linux ARM 容器）'
         type: boolean
         default: false
       # ─────────── 通用 ───────────
@@ -152,11 +152,6 @@ jobs:
           rpm)
             sudo apt-get install -y rpm rpm2cpio cpio
             ;;
-          pkg.tar.zst)
-            sudo apt-get install -y \
-              pacman-package-manager arch-install-scripts \
-              fakeroot libarchive-tools
-            ;;
         esac
 
     - name: Verify config file exists
@@ -177,7 +172,8 @@ jobs:
         cp "../${{ inputs.config_file }}" .config
         make ARCH=${{ steps.arch.outputs.karch }} olddefconfig
 
-    - name: Build kernel packages
+    - name: Build kernel packages (deb / rpm)
+      if: matrix.format != 'pkg.tar.zst'
       run: |
         cd kernel-source
         case "${{ matrix.format }}" in
@@ -189,24 +185,59 @@ jobs:
                  -j$(nproc) bindeb-pkg
             ;;
           rpm)
+            # KCFLAGS="-g0" 阻止生成 debuginfo 文件，
+            # 避免 6.x 之后 binrpm-pkg 报 "Installed (but unpackaged) file(s) found"
             make ARCH=${{ steps.arch.outputs.karch }} \
+                 KCFLAGS="-g0" \
+                 RPM_BUILD_NCPUS=$(nproc) \
                  -j$(nproc) binrpm-pkg
             ;;
-          pkg.tar.zst)
-            sudo useradd -m builder 2>/dev/null || true
+        esac
 
-            pkgctl repo clone --protocol=https linux 2>/dev/null || {
-              git clone --depth 1 https://gitlab.archlinux.org/archlinux/packaging/packages/linux.git
-            }
-
-            cd linux
-            sed -i 's/^pkgbase=.*/pkgbase=linux-custom/' PKGBUILD
-            cp "../../${{ inputs.config_file }}" config
-
-            chown -R builder:builder .
-            sudo -u builder makepkg -s --noconfirm --nodeps
+    - name: Build kernel packages (pkg.tar.zst)
+      if: matrix.format == 'pkg.tar.zst'
+      run: |
+        # 根据目标架构选择 Arch 容器镜像
+        case "${{ matrix.arch }}" in
+          x86_64)
+            ARCH_IMAGE="archlinux:latest"
+            ;;
+          arm64)
+            ARCH_IMAGE="menci/archlinuxarm:base-devel"
             ;;
         esac
+        echo "Using Arch container image: $ARCH_IMAGE"
+
+        docker run --rm \
+          -v "$PWD:/workspace" \
+          -w /workspace \
+          "$ARCH_IMAGE" \
+          bash -c '
+            set -e
+
+            # 基础构建工具（base-devel 已包含在 base-devel 镜像中）
+            pacman -Sy --noconfirm --needed \
+              base-devel git libarchive jq \
+              bc rsync kmod inetutils \
+              elfutils debugedit zstd
+
+            # 非 root 用户，makepkg 不允许 root 运行
+            useradd -m builder
+            chown -R builder:builder /workspace
+
+            # 克隆 Arch 官方打包仓库
+            git clone --depth 1 \
+              https://gitlab.archlinux.org/archlinux/packaging/packages/linux.git \
+              arch-pkg
+            cd arch-pkg
+
+            # 修改包名并把内核配置复制进打包仓库
+            sed -i "s/^pkgbase=.*/pkgbase=linux-custom/" PKGBUILD
+            cp "/workspace/kernel-source/${{ inputs.config_file }}" config
+
+            # 以 builder 用户执行 makepkg
+            su builder -c "makepkg -s --noconfirm --nodeps --ignorearch"
+          '
 
     - name: Collect artifacts
       run: |
@@ -225,7 +256,7 @@ jobs:
               -exec mv {} dist/ \;
             ;;
           pkg.tar.zst)
-            find kernel-source/linux -maxdepth 1 -type f -name '*.pkg.tar.zst' \
+            find . -maxdepth 2 -type f -name '*.pkg.tar.zst' \
               -exec mv {} dist/ \;
             ;;
         esac
@@ -242,7 +273,7 @@ jobs:
         if-no-files-found: error
 
   # ------------------------------------------------------------------
-  # 作业 3：发布 Release（独立 job，不依赖特定矩阵项）
+  # 作业 3：发布 Release
   # ------------------------------------------------------------------
   publish:
     needs: build
