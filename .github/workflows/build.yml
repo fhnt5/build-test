@@ -187,6 +187,7 @@ jobs:
           rpm)
             # KCFLAGS="-g0" 阻止生成 debuginfo 文件，
             # 避免 6.x 之后 binrpm-pkg 报 "Installed (but unpackaged) file(s) found"
+            # 参考：commit 62089b804895 引入的回归问题
             make ARCH=${{ steps.arch.outputs.karch }} \
                  KCFLAGS="-g0" \
                  RPM_BUILD_NCPUS=$(nproc) \
@@ -215,8 +216,13 @@ jobs:
           bash -c '
             set -e
 
-            # 基础构建工具（base-devel 已包含在 base-devel 镜像中）
-            pacman -Sy --noconfirm --needed \
+            # ── 关键修复：禁用 pacman 的 Landlock 沙盒 ──
+            # pacman 7.0+ 默认启用沙盒，但容器内核可能不支持 Landlock
+            sed -i "s/^#DisableSandbox/DisableSandbox/" /etc/pacman.conf
+
+            # 基础构建工具
+            # --disable-sandbox 作为双保险，确保在沙盒不可用时也能正常安装包
+            pacman -Sy --noconfirm --needed --disable-sandbox \
               base-devel git libarchive jq \
               bc rsync kmod inetutils \
               elfutils debugedit zstd
@@ -233,7 +239,11 @@ jobs:
 
             # 修改包名并把内核配置复制进打包仓库
             sed -i "s/^pkgbase=.*/pkgbase=linux-custom/" PKGBUILD
-            cp "/workspace/kernel-source/${{ inputs.config_file }}" config
+
+            # ── 关键修复：配置文件从 /workspace/ 根目录复制，而非 /workspace/kernel-source/ ──
+            # inputs.config_file 的值如 "configs/G40_45.config"，
+            # 它位于你仓库根目录的 configs/ 下，而不是内核源码仓库里
+            cp "/workspace/${{ inputs.config_file }}" config
 
             # 以 builder 用户执行 makepkg
             su builder -c "makepkg -s --noconfirm --nodeps --ignorearch"
@@ -251,8 +261,8 @@ jobs:
               -exec mv {} dist/ \;
             ;;
           rpm)
-            find kernel-source/.. -maxdepth 1 -type f \
-              \( -name 'kernel-*.rpm' -o -name 'linux-*.rpm' \) \
+            # ── 关键修复：binrpm-pkg 生成的 RPM 位于 kernel-source/rpmbuild/RPMS/ 下 ──
+            find kernel-source/rpmbuild/RPMS -type f -name '*.rpm' \
               -exec mv {} dist/ \;
             ;;
           pkg.tar.zst)
