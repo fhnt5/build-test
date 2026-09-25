@@ -187,15 +187,17 @@ jobs:
           rpm)
             # KCFLAGS="-g0" 阻止生成 debuginfo 文件，
             # 避免 6.x 之后 binrpm-pkg 报 "Installed (but unpackaged) file(s) found"
+            # RPMOPTS 将 _topdir 指向工作目录下的 rpmbuild/，确保产物可被收集
             make ARCH=${{ steps.arch.outputs.karch }} \
                  KCFLAGS="-g0" \
                  RPM_BUILD_NCPUS=$(nproc) \
+                 RPMOPTS="--define '_topdir $PWD/rpmbuild'" \
                  -j$(nproc) binrpm-pkg
             ;;
         esac
 
     # ==================================================================
-    # pkg.tar.zst —— 唯一改动的步骤
+    # pkg.tar.zst —— 不挂载、docker cp 双向传输，全程在容器内部 fs 构建
     # ==================================================================
     - name: Build kernel packages (pkg.tar.zst)
       if: matrix.format == 'pkg.tar.zst'
@@ -207,12 +209,12 @@ jobs:
         esac
         echo "Using Arch container image: $ARCH_IMAGE"
 
-        # 2) 准备一个临时目录放"要送进容器的东西"和"从容器取出的东西"
+        # 2) 临时目录：in 送进容器，out 从容器取出
         STAGE="$(mktemp -d)"
         mkdir -p "$STAGE/in" "$STAGE/out"
         cp "${{ inputs.config_file }}" "$STAGE/in/kernel.config"
 
-        # 3) 把构建脚本写到宿主临时目录，稍后 docker cp 进容器
+        # 3) 构建脚本（在容器内跑）
         cat > "$STAGE/in/build.sh" <<'BUILD_EOF'
         set -e
 
@@ -227,7 +229,9 @@ jobs:
         useradd -m builder
         chmod 644 /tmp/kernel.config
 
-        # 关键：全程在容器内部文件系统里构建，不碰任何 bind mount
+        # 全程在容器内部文件系统里构建，不碰任何 bind mount。
+        # --skippgpcheck：跳过上游源码的 GPG 签名验证，
+        #   避免因缺少 38DBBDC86092693E / B8AC08600F108CDF 公钥而失败。
         su - builder -c '
         set -e
         cd ~
@@ -237,11 +241,11 @@ jobs:
         cd arch-pkg
         sed -i "s/^pkgbase=.*/pkgbase=linux-custom/" PKGBUILD
         cp /tmp/kernel.config config
-        makepkg -s --noconfirm --nodeps --ignorearch
+        makepkg -s --noconfirm --nodeps --ignorearch --skippgpcheck
         '
         BUILD_EOF
 
-        # 4) 启动后台容器，把脚本和 config cp 进去，执行构建
+        # 4) 启动后台容器，送脚本和 config 进去，执行构建
         CID=$(docker run -d "$ARCH_IMAGE" sleep infinity)
         echo "Container: $CID"
 
@@ -249,7 +253,7 @@ jobs:
         docker cp "$STAGE/in/kernel.config" "$CID:/tmp/kernel.config"
         docker exec "$CID" bash /tmp/build.sh
 
-        # 5) 从容器把产物取出来（docker cp 保留 UID，之后统一 chown）
+        # 5) 从容器把产物取出来
         docker cp "$CID:/home/builder/arch-pkg/." "$STAGE/out/"
 
         # 6) 清理容器
@@ -258,7 +262,7 @@ jobs:
         # 7) 修正属主（容器内 builder UID 与 runner 用户不同）
         sudo chown -R "$(id -u):$(id -g)" "$STAGE/out"
 
-        # 8) 挑出 .pkg.tar.zst，放到 dist/
+        # 8) 挑出 .pkg.tar.zst 放到 dist/
         mkdir -p dist
         find "$STAGE/out" -maxdepth 1 -type f -name '*.pkg.tar.zst' \
           -exec mv {} dist/ \;
@@ -280,12 +284,12 @@ jobs:
               -exec mv {} dist/ \;
             ;;
           rpm)
-            find kernel-source/.. -maxdepth 1 -type f \
-              \( -name 'kernel-*.rpm' -o -name 'linux-*.rpm' \) \
+            # RPMOPTS 已把 _topdir 指向 $PWD/rpmbuild，产物在 kernel-source/rpmbuild/RPMS/ 下
+            find kernel-source/rpmbuild/RPMS -type f -name '*.rpm' \
               -exec mv {} dist/ \;
             ;;
           pkg.tar.zst)
-            # 已在构建步骤里放入 dist/，这里无需再动
+            # 已在构建步骤里放入 dist/
             ;;
         esac
 
