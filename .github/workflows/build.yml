@@ -62,11 +62,11 @@ on:
       kernel_repo:
         description: '内核源码仓库 URL'
         required: true
-        default: 'https://github.com/zen-kernel/zen-kernel.git'
+        default: 'https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux-stable.git'
       kernel_ref:
-        description: '分支或 tag（如 v7.2.6-lqx1 / master）'
-        required: true
-        default: 'v7.2.6-lqx1'
+        description: '分支或 tag（如 v7.2.6 / master）。留空则自动使用最新 stable 版本'
+        required: false
+        default: ''
       release_tag:
         description: '（可选）完成后发布到该 tag 的 Release，留空则不发布'
         required: false
@@ -114,10 +114,45 @@ jobs:
           echo "count=$COUNT"   >> "$GITHUB_OUTPUT"
 
   # ------------------------------------------------------------------
-  # 作业 2：按矩阵构建
+  # 作业 2：解析最新 stable 版本号
+  # ------------------------------------------------------------------
+  resolve-ref:
+    runs-on: ubuntu-latest
+    outputs:
+      kernel_ref: ${{ steps.resolve.outputs.kernel_ref }}
+    steps:
+      - name: Resolve kernel ref
+        id: resolve
+        run: |
+          INPUT_REF="${{ inputs.kernel_ref }}"
+
+          if [ -n "$INPUT_REF" ]; then
+            echo "User provided ref: $INPUT_REF"
+            echo "kernel_ref=$INPUT_REF" >> "$GITHUB_OUTPUT"
+          else
+            echo "No ref provided, detecting latest stable tag from kernel.org..."
+            # 从 kernel.org 的 stable 仓库获取最新稳定 tag
+            # 使用 git ls-remote 查询，过滤掉 -rc 版本
+            LATEST=$(git ls-remote --tags --refs \
+              https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux-stable.git \
+              | awk -F/ '{print $NF}' \
+              | grep -E '^v[0-9]+\.[0-9]+(\.[0-9]+)?$' \
+              | sort -V \
+              | tail -1)
+
+            if [ -z "$LATEST" ]; then
+              echo "ERROR: failed to detect latest stable tag" >&2
+              exit 1
+            fi
+            echo "Detected latest stable: $LATEST"
+            echo "kernel_ref=$LATEST" >> "$GITHUB_OUTPUT"
+          fi
+
+  # ------------------------------------------------------------------
+  # 作业 3：按矩阵构建
   # ------------------------------------------------------------------
   build:
-    needs: prepare
+    needs: [prepare, resolve-ref]
     runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
     timeout-minutes: 360
     strategy:
@@ -133,7 +168,7 @@ jobs:
         echo "Arch:          ${{ matrix.arch }}"
         echo "Format:        ${{ matrix.format }}"
         echo "Repo:          ${{ inputs.kernel_repo }}"
-        echo "Ref:           ${{ inputs.kernel_ref }}"
+        echo "Ref:           ${{ needs.resolve-ref.outputs.kernel_ref }}"
         echo "Config choice: ${{ inputs.config_choice }}"
         echo "Config custom: ${{ inputs.config_custom }}"
         echo "Runner:        ${{ runner.os }} / ${{ runner.arch }}"
@@ -182,7 +217,7 @@ jobs:
 
     - name: Clone kernel source
       run: |
-        git clone --depth 1 --branch "${{ inputs.kernel_ref }}" \
+        git clone --depth 1 --branch "${{ needs.resolve-ref.outputs.kernel_ref }}" \
           "${{ inputs.kernel_repo }}" kernel-source
 
     # ==================================================================
@@ -410,7 +445,7 @@ jobs:
         if-no-files-found: error
 
   # ------------------------------------------------------------------
-  # 作业 3：发布 Release
+  # 作业 4：发布 Release
   # ------------------------------------------------------------------
   publish:
     needs: build
