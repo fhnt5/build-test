@@ -333,7 +333,7 @@ jobs:
         esac
 
     # ==================================================================
-    # pkg.tar.zst —— BTF 注入挪到 root 阶段，直接改 /tmp/kernel.config
+    # pkg.tar.zst —— docker cp 加 --chown=root:root
     # ==================================================================
     - name: Build kernel packages (pkg.tar.zst)
       if: matrix.format == 'pkg.tar.zst'
@@ -358,11 +358,10 @@ jobs:
           base-devel git libarchive jq bc rsync kmod inetutils \
           elfutils debugedit zstd pahole
 
-        # ── BTF 注入：在 root 阶段直接改 /tmp/kernel.config ──
+        # ── BTF 注入：直接改 /tmp/kernel.config ──
         # Linux 7.2.7 的 bpftool 构建强制要求 vmlinux 含 .BTF 段。
         # 若配置未开启 CONFIG_DEBUG_INFO_BTF，就会报
         # "failed to find '.BTF' ELF section in vmlinux" 而失败。
-        # 这里在 root 阶段统一注入，避免在 builder 阶段操作不存在的文件。
         echo "---- Injecting BTF config into /tmp/kernel.config ----"
         CFG=/tmp/kernel.config
         sed -i -E '/^(# )?CONFIG_DEBUG_INFO_BTF(=| |_)/d' "$CFG"
@@ -415,8 +414,13 @@ jobs:
         CID=$(docker run -d "$ARCH_IMAGE" sleep infinity)
         echo "Container: $CID"
 
-        docker cp "$STAGE/in/build.sh"      "$CID:/tmp/build.sh"
-        docker cp "$STAGE/in/kernel.config" "$CID:/tmp/kernel.config"
+        # ── 关键修复：--chown=root:root ──
+        # docker cp 默认保留宿主 UID/GID（runner 用户 UID 1001），
+        # 导致容器内文件属主非 root，sed -i 无法写。
+        # 强制把容器内文件归属 root，保证后续 sed 正常执行。
+        docker cp --chown=root:root "$STAGE/in/build.sh"      "$CID:/tmp/build.sh"
+        docker cp --chown=root:root "$STAGE/in/kernel.config" "$CID:/tmp/kernel.config"
+
         docker exec "$CID" bash /tmp/build.sh
 
         docker cp "$CID:/home/builder/arch-pkg/." "$STAGE/out/"
