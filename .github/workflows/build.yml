@@ -323,7 +323,7 @@ jobs:
         esac
 
     # ==================================================================
-    # pkg.tar.zst —— 用 stdin + cat 送文件，绕开 docker cp / rootless 权限坑
+    # pkg.tar.zst —— cp config 后强制跟一次 olddefconfig
     # ==================================================================
     - name: Build kernel packages (pkg.tar.zst)
       if: matrix.format == 'pkg.tar.zst'
@@ -384,10 +384,15 @@ jobs:
         # 它从 $srcdir 找 config.aarch64 / config.x86_64。
         # aarch64 版本官方根本没提供，所以 arm64 必然失败；
         # x86_64 虽然能过，但用的其实是官方 config 而不是用户输入的。
-        # 直接把那一行替换成从 /tmp/kernel.config 复制，一次解决两个问题。
+        #
+        # 关键修复（本版新增）：把 cp 那行替换为
+        #   cp /tmp/kernel.config .config && make olddefconfig
+        # 原因是官方 PKGBUILD 在 cp 之后没有跑 olddefconfig，
+        # 我们注入的 CONFIG_DEBUG_INFO_BTF 会因依赖检查被 Kconfig 静默丢弃，
+        # vmlinux 里就不会有 .BTF 段，bpftool 构建随即失败。
         echo "---- PKGBUILD config line (before) ----"
         grep -nE "cp[[:space:]]+.*config" PKGBUILD || true
-        sed -i -E "s|cp[[:space:]]+\.\./config\.[^[:space:]]+[[:space:]]+\.config|cp /tmp/kernel.config .config|" PKGBUILD
+        sed -i -E "s|cp[[:space:]]+\.\./config\.[^[:space:]]+[[:space:]]+\.config|cp /tmp/kernel.config .config \&\& make olddefconfig|" PKGBUILD
         echo "---- PKGBUILD config line (after) ----"
         grep -nE "cp[[:space:]]+.*config" PKGBUILD || true
 
@@ -400,17 +405,10 @@ jobs:
         CID=$(docker run -d "$ARCH_IMAGE" sleep infinity)
         echo "Container: $CID"
 
-        # ── 关键修复 ──
-        # 这个 runner 用的是 rootless Docker（userns-remap）。
-        # docker cp 会把宿主文件的 UID（runner 用户的 1001）原样带进容器，
-        # 容器内的"root"是被映射后的非特权用户，没有 CAP_DAC_OVERRIDE，
-        # 因此对属主非自己的文件既不能 chown 也不能 sed -i。
-        # 解决：用 stdin + cat，让容器内的 cat 以 root 运行并创建文件，
-        # 属主自然就是容器内的 root，权限完全正确。
+        # rootless Docker + userns-remap 下用 stdin + cat，让容器内 root 自己创建文件
         docker exec -i -u 0 "$CID" sh -c 'cat > /tmp/build.sh'      < "$STAGE/in/build.sh"
         docker exec -i -u 0 "$CID" sh -c 'cat > /tmp/kernel.config' < "$STAGE/in/kernel.config"
 
-        # 兜底诊断：确认容器内文件属主与权限，便于日后排查
         echo "---- container /tmp file check ----"
         docker exec -u 0 "$CID" ls -l /tmp/build.sh /tmp/kernel.config
 
