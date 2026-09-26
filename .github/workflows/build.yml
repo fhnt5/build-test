@@ -333,7 +333,7 @@ jobs:
         esac
 
     # ==================================================================
-    # pkg.tar.zst —— 修复 BTF 缺失问题
+    # pkg.tar.zst —— BTF 注入挪到 root 阶段，直接改 /tmp/kernel.config
     # ==================================================================
     - name: Build kernel packages (pkg.tar.zst)
       if: matrix.format == 'pkg.tar.zst'
@@ -351,17 +351,40 @@ jobs:
         cat > "$STAGE/in/build.sh" <<'BUILD_EOF'
         set -e
 
-        # pacman 7.0+ 默认启用 Landlock 沙盒，容器内核可能不支持
+        # pacman 7.0+ 默认启用 Landlock 沙盒
         sed -i "s/^#DisableSandbox/DisableSandbox/" /etc/pacman.conf
 
         pacman -Sy --noconfirm --needed --disable-sandbox \
           base-devel git libarchive jq bc rsync kmod inetutils \
           elfutils debugedit zstd pahole
 
+        # ── BTF 注入：在 root 阶段直接改 /tmp/kernel.config ──
+        # Linux 7.2.7 的 bpftool 构建强制要求 vmlinux 含 .BTF 段。
+        # 若配置未开启 CONFIG_DEBUG_INFO_BTF，就会报
+        # "failed to find '.BTF' ELF section in vmlinux" 而失败。
+        # 这里在 root 阶段统一注入，避免在 builder 阶段操作不存在的文件。
+        echo "---- Injecting BTF config into /tmp/kernel.config ----"
+        CFG=/tmp/kernel.config
+        sed -i -E '/^(# )?CONFIG_DEBUG_INFO_BTF(=| |_)/d' "$CFG"
+        sed -i -E '/^(# )?CONFIG_DEBUG_INFO_REDUCED(=| )/d' "$CFG"
+        sed -i -E '/^(# )?CONFIG_DEBUG_INFO_SPLIT(=| )/d' "$CFG"
+        sed -i -E '/^(# )?CONFIG_DEBUG_INFO_DWARF4(=| )/d' "$CFG"
+        sed -i -E '/^(# )?CONFIG_DEBUG_INFO_DWARF5(=| )/d' "$CFG"
+        {
+          echo "CONFIG_DEBUG_INFO=y"
+          echo "CONFIG_DEBUG_INFO_DWARF5=y"
+          echo "# CONFIG_DEBUG_INFO_REDUCED is not set"
+          echo "# CONFIG_DEBUG_INFO_SPLIT is not set"
+          echo "CONFIG_DEBUG_INFO_BTF=y"
+          echo "CONFIG_DEBUG_INFO_BTF_MODULES=y"
+        } >> "$CFG"
+        echo "---- BTF config injected ----"
+
         # makepkg 不允许 root 运行
         useradd -m builder
-        chmod 644 /tmp/kernel.config
+        chmod 644 "$CFG"
 
+        # ── builder 阶段：clone + 构建 ──
         su - builder -c '
         set -e
         cd ~
@@ -371,35 +394,7 @@ jobs:
         cd arch-pkg
         sed -i "s/^pkgbase=.*/pkgbase=linux-custom/" PKGBUILD
 
-        # ── 修复 BTF 缺失问题 ──
-        # Linux 7.2.7 的 bpftool 构建强制要求 vmlinux 包含 .BTF 段。
-        # 如果用户配置或默认 defconfig 未开启 CONFIG_DEBUG_INFO_BTF，
-        # 构建就会因 "failed to find .BTF ELF section" 而失败。
-        # 这里在 PKGBUILD 的 prepare() 阶段强制注入 BTF 相关配置，
-        # 确保 vmlinux 中包含 BTF 信息。
-        #
-        # 注意：CONFIG_DEBUG_INFO_BTF 与 CONFIG_DEBUG_INFO_REDUCED 不兼容，
-        #       arm64 的 defconfig 可能启用了后者，需要一并处理。
-        #       此外，pahole 工具已在上面的 pacman 命令中安装。
-        echo "---- Injecting BTF config into kernel config ----"
-        # 先确保 BTF 依赖的调试信息配置正确
-        sed -i "s/^CONFIG_DEBUG_INFO_REDUCED=y/# CONFIG_DEBUG_INFO_REDUCED is not set/" config
-        # 强制开启 BTF 及模块 BTF
-        echo "CONFIG_DEBUG_INFO_BTF=y" >> config
-        echo "CONFIG_DEBUG_INFO_BTF_MODULES=y" >> config
-        # 如果开启了 CONFIG_DEBUG_INFO_BTF，必须关闭 CONFIG_DEBUG_INFO_REDUCED
-        # 如果开启了 CONFIG_DEBUG_INFO_BTF，必须开启 CONFIG_DEBUG_INFO
-        echo "CONFIG_DEBUG_INFO=y" >> config
-        # 确保 .BTF 段被生成，还需要开启 DEBUG_INFO_DWARF4/5（二选一）
-        echo "CONFIG_DEBUG_INFO_DWARF5=y" >> config
-        # 关闭 CONFIG_DEBUG_INFO_REDUCED
-        echo "# CONFIG_DEBUG_INFO_REDUCED is not set" >> config
-        # 确保 BTF 不被 DEBUG_INFO_SPLIT 影响
-        echo "# CONFIG_DEBUG_INFO_SPLIT is not set" >> config
-        echo "---- BTF config injected ----"
-
-        # 将用户配置复制到 PKGBUILD 期望的位置
-        # 注意：PKGBUILD 的 prepare() 里写死了 cp ../config.$CARCH .config，
+        # 官方 PKGBUILD 的 prepare() 里写死了 cp ../config.$CARCH .config，
         # 它从 $srcdir 找 config.aarch64 / config.x86_64。
         # aarch64 版本官方根本没提供，所以 arm64 必然失败；
         # x86_64 虽然能过，但用的其实是官方 config 而不是用户输入的。
