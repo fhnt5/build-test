@@ -323,7 +323,7 @@ jobs:
         esac
 
     # ==================================================================
-    # pkg.tar.zst —— 用 docker exec -u 0 强制 root 运行，绕开 --chown 兼容性
+    # pkg.tar.zst —— 用 stdin + cat 送文件，绕开 docker cp / rootless 权限坑
     # ==================================================================
     - name: Build kernel packages (pkg.tar.zst)
       if: matrix.format == 'pkg.tar.zst'
@@ -400,12 +400,20 @@ jobs:
         CID=$(docker run -d "$ARCH_IMAGE" sleep infinity)
         echo "Container: $CID"
 
-        # docker cp 保留宿主 UID/GID（runner 用户 UID 1001），
-        # 在容器里可能无法被默认用户写入。
-        # 这里用 -u 0 强制以 root 身份执行，绕开 --chown 的兼容性问题
-        # （老版本 Docker 不支持 --chown）。
-        docker cp "$STAGE/in/build.sh"      "$CID:/tmp/build.sh"
-        docker cp "$STAGE/in/kernel.config" "$CID:/tmp/kernel.config"
+        # ── 关键修复 ──
+        # 这个 runner 用的是 rootless Docker（userns-remap）。
+        # docker cp 会把宿主文件的 UID（runner 用户的 1001）原样带进容器，
+        # 容器内的"root"是被映射后的非特权用户，没有 CAP_DAC_OVERRIDE，
+        # 因此对属主非自己的文件既不能 chown 也不能 sed -i。
+        # 解决：用 stdin + cat，让容器内的 cat 以 root 运行并创建文件，
+        # 属主自然就是容器内的 root，权限完全正确。
+        docker exec -i -u 0 "$CID" sh -c 'cat > /tmp/build.sh'      < "$STAGE/in/build.sh"
+        docker exec -i -u 0 "$CID" sh -c 'cat > /tmp/kernel.config' < "$STAGE/in/kernel.config"
+
+        # 兜底诊断：确认容器内文件属主与权限，便于日后排查
+        echo "---- container /tmp file check ----"
+        docker exec -u 0 "$CID" ls -l /tmp/build.sh /tmp/kernel.config
+
         docker exec -u 0 "$CID" bash /tmp/build.sh
 
         docker cp "$CID:/home/builder/arch-pkg/." "$STAGE/out/"
