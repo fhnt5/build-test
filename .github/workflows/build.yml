@@ -228,13 +228,11 @@ jobs:
         KARCH="${{ steps.arch.outputs.karch }}"
         CONFIG_OUT="/tmp/kernel.config"
 
-        # 自定义优先
         if [ -n "$CUSTOM" ]; then
           echo "==> config_custom provided, overriding choice: $CUSTOM"
           CHOICE="$CUSTOM"
         fi
 
-        # 判定配置来源
         if [ -z "$CHOICE" ] || [ "$CHOICE" = "default" ]; then
           echo "==> Source: kernel defconfig (make defconfig)"
           cd kernel-source
@@ -259,9 +257,6 @@ jobs:
           echo "CONFIG_SOURCE=configs/$CHOICE" >> "$GITHUB_ENV"
 
         else
-          # 视为发行版名，从下面这张 URL 表里查
-          # 注意：这些 URL 是 best-effort，上游随时可能改动路径或分支；
-          #       如果某个发行版拉取失败，请更新 URL 或改用 config_custom。
           case "$CHOICE" in
             alma)     URL='https://git.almalinux.org/rpms/kernel/-/raw/c9/f/kernel-x86_64-fedora.config' ;;
             alpine)   URL='https://gitlab.alpinelinux.org/alpine/aports/-/raw/master/main/linux-lts/config-lts.x86_64' ;;
@@ -294,7 +289,6 @@ jobs:
           echo "CONFIG_SOURCE=$CHOICE ($URL)" >> "$GITHUB_ENV"
         fi
 
-        # 快速校验
         if [ ! -s "$CONFIG_OUT" ]; then
           echo "ERROR: resolved config is empty: $CONFIG_OUT" >&2
           exit 1
@@ -303,7 +297,6 @@ jobs:
         head -5 "$CONFIG_OUT"
         echo "---- config lines: $(wc -l < "$CONFIG_OUT") ----"
 
-        # 应用到 kernel-source，跑 olddefconfig 适配架构差异
         cd kernel-source
         cp "$CONFIG_OUT" .config
         make ARCH="$KARCH" olddefconfig
@@ -321,9 +314,6 @@ jobs:
                  -j$(nproc) bindeb-pkg
             ;;
           rpm)
-            # KCFLAGS="-g0" 阻止生成 debuginfo 文件，
-            # 避免 6.x 之后 binrpm-pkg 报 "Installed (but unpackaged) file(s) found"
-            # RPMOPTS 把 _topdir 指向工作目录，确保产物可被收集
             make ARCH=${{ steps.arch.outputs.karch }} \
                  KCFLAGS="-g0" \
                  RPM_BUILD_NCPUS=$(nproc) \
@@ -333,7 +323,7 @@ jobs:
         esac
 
     # ==================================================================
-    # pkg.tar.zst —— docker cp 加 --chown=root:root
+    # pkg.tar.zst —— 用 docker exec -u 0 强制 root 运行，绕开 --chown 兼容性
     # ==================================================================
     - name: Build kernel packages (pkg.tar.zst)
       if: matrix.format == 'pkg.tar.zst'
@@ -360,8 +350,6 @@ jobs:
 
         # ── BTF 注入：直接改 /tmp/kernel.config ──
         # Linux 7.2.7 的 bpftool 构建强制要求 vmlinux 含 .BTF 段。
-        # 若配置未开启 CONFIG_DEBUG_INFO_BTF，就会报
-        # "failed to find '.BTF' ELF section in vmlinux" 而失败。
         echo "---- Injecting BTF config into /tmp/kernel.config ----"
         CFG=/tmp/kernel.config
         sed -i -E '/^(# )?CONFIG_DEBUG_INFO_BTF(=| |_)/d' "$CFG"
@@ -383,7 +371,6 @@ jobs:
         useradd -m builder
         chmod 644 "$CFG"
 
-        # ── builder 阶段：clone + 构建 ──
         su - builder -c '
         set -e
         cd ~
@@ -404,7 +391,6 @@ jobs:
         echo "---- PKGBUILD config line (after) ----"
         grep -nE "cp[[:space:]]+.*config" PKGBUILD || true
 
-        # 兜底：也放一份裸名 config
         cp /tmp/kernel.config config
 
         makepkg -s --noconfirm --nodeps --ignorearch --skipinteg
@@ -414,14 +400,13 @@ jobs:
         CID=$(docker run -d "$ARCH_IMAGE" sleep infinity)
         echo "Container: $CID"
 
-        # ── 关键修复：--chown=root:root ──
-        # docker cp 默认保留宿主 UID/GID（runner 用户 UID 1001），
-        # 导致容器内文件属主非 root，sed -i 无法写。
-        # 强制把容器内文件归属 root，保证后续 sed 正常执行。
-        docker cp --chown=root:root "$STAGE/in/build.sh"      "$CID:/tmp/build.sh"
-        docker cp --chown=root:root "$STAGE/in/kernel.config" "$CID:/tmp/kernel.config"
-
-        docker exec "$CID" bash /tmp/build.sh
+        # docker cp 保留宿主 UID/GID（runner 用户 UID 1001），
+        # 在容器里可能无法被默认用户写入。
+        # 这里用 -u 0 强制以 root 身份执行，绕开 --chown 的兼容性问题
+        # （老版本 Docker 不支持 --chown）。
+        docker cp "$STAGE/in/build.sh"      "$CID:/tmp/build.sh"
+        docker cp "$STAGE/in/kernel.config" "$CID:/tmp/kernel.config"
+        docker exec -u 0 "$CID" bash /tmp/build.sh
 
         docker cp "$CID:/home/builder/arch-pkg/." "$STAGE/out/"
         docker rm -f "$CID"
@@ -453,7 +438,6 @@ jobs:
               -exec mv {} dist/ \;
             ;;
           pkg.tar.zst)
-            # 已在构建步骤里放入 dist/
             ;;
         esac
 
