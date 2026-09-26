@@ -1,4 +1,4 @@
-name: Build Arch Linux Kernel
+name: Build Kernel
 
 on:
   workflow_dispatch:
@@ -16,12 +16,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Prepare kernel config
-        run: |
-          # 这里假设 kernel.config 已经在仓库里，或由前一步生成
-          # 如果它在仓库根目录，直接复制到 /tmp
-          cp kernel.config /tmp/kernel.config
 
       - name: Build in Arch container
         shell: bash
@@ -120,10 +114,3 @@ jobs:
           echo "---- pkg artifacts ----"
           ls -lh dist/
           test -n "$(find dist -maxdepth 1 -type f -name '*.pkg.tar.zst' -print -quit)"
-
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: arch-kernel-${{ matrix.arch }}
-          path: dist/*.pkg.tar.zst
-          if-no-files-found: error
