@@ -299,7 +299,26 @@ jobs:
 
         cd kernel-source
         cp "$CONFIG_OUT" .config
+
+        # ── 为 pkg.tar.zst (Arch) 构建启用 BTF ──
+        # Arch 的 PKGBUILD 会构建 bpftool，bpftool 需要从 vmlinux 中
+        # 读取 .BTF 段来生成 vmlinux.h。默认 x86_64_defconfig 没有开启
+        # BTF，会导致 "failed to find '.BTF' ELF section" 错误。
+        if [ "${{ matrix.format }}" = "pkg.tar.zst" ]; then
+          echo "==> Enabling BTF for Arch packaging (required by bpftool)"
+          scripts/config --file .config \
+            --enable DEBUG_INFO \
+            --enable DEBUG_INFO_BTF \
+            --enable DEBUG_INFO_BTF_MODULES
+        fi
+
         make ARCH="$KARCH" olddefconfig
+
+        # 对于 Arch 打包，把最终配置回写到 /tmp/kernel.config，
+        # 因为容器内 PKGBUILD 使用的是 /tmp/kernel.config
+        if [ "${{ matrix.format }}" = "pkg.tar.zst" ]; then
+          cp .config "$CONFIG_OUT"
+        fi
 
     - name: Build kernel packages (deb / rpm)
       if: matrix.format != 'pkg.tar.zst'
@@ -323,7 +342,7 @@ jobs:
         esac
 
     # ==================================================================
-    # pkg.tar.zst —— 修复 -Wformat-security 错误
+    # pkg.tar.zst —— 修复 BTF 缺失导致的 bpftool 构建失败
     # ==================================================================
     - name: Build kernel packages (pkg.tar.zst)
       if: matrix.format == 'pkg.tar.zst'
@@ -339,54 +358,59 @@ jobs:
         cp /tmp/kernel.config "$STAGE/in/kernel.config"
 
         cat > "$STAGE/in/build.sh" <<'BUILD_EOF'
-        set -e
+#!/bin/bash
+set -e
 
-        sed -i "s/^#DisableSandbox/DisableSandbox/" /etc/pacman.conf
+sed -i "s/^#DisableSandbox/DisableSandbox/" /etc/pacman.conf
 
-        pacman -Sy --noconfirm --needed --disable-sandbox \
-          base-devel git libarchive jq bc rsync kmod inetutils \
-          elfutils debugedit zstd pahole
+pacman -Sy --noconfirm --needed --disable-sandbox \
+  base-devel git libarchive jq bc rsync kmod inetutils \
+  elfutils debugedit zstd pahole fakeroot
 
-        useradd -m builder
-        chmod 644 /tmp/kernel.config
+useradd -m builder
 
-        su - builder -c '
-        set -e
-        cd ~
-        git clone --depth 1 \
-          https://gitlab.archlinux.org/archlinux/packaging/packages/linux.git \
-          arch-pkg
-        cd arch-pkg
-        sed -i "s/^pkgbase=.*/pkgbase=linux-custom/" PKGBUILD
+cp /tmp/kernel.config /home/builder/kernel.config
+chown builder:builder /home/builder/kernel.config
 
-        echo "---- PKGBUILD config line (before) ----"
-        grep -nE "cp[[:space:]]+.*config" PKGBUILD || true
-        sed -i -E "s|cp[[:space:]]+\.\./config\.[^[:space:]]+[[:space:]]+\.config|cp /tmp/kernel.config .config|" PKGBUILD
-        echo "---- PKGBUILD config line (after) ----"
-        grep -nE "cp[[:space:]]+.*config" PKGBUILD || true
+sudo -u builder bash -c '
+set -e
+cd ~
+git clone --depth 1 \
+  https://gitlab.archlinux.org/archlinux/packaging/packages/linux.git \
+  arch-pkg
+cd arch-pkg
+sed -i "s/^pkgbase=.*/pkgbase=linux-custom/" PKGBUILD
 
-        cp /tmp/kernel.config config
+echo "---- PKGBUILD config line (before) ----"
+grep -nE "cp[[:space:]]+.*config" PKGBUILD || true
+sed -i -E "s|cp[[:space:]]+\.\./config\.[^[:space:]]+[[:space:]]+\.config|cp ~/kernel.config .config|" PKGBUILD
+echo "---- PKGBUILD config line (after) ----"
+grep -nE "cp[[:space:]]+.*config" PKGBUILD || true
 
-        # ── 修复 -Wformat-security 错误 ──
-        # tools/lib/bpf 的编译过程中，CFLAGS 带了 -Wformat-security 却没带
-        # -Wformat，配合 -Werror 就变成了硬错误。给它降级掉。
-        export CFLAGS="${CFLAGS} -Wno-error=format-security"
-        export CXXFLAGS="${CXXFLAGS} -Wno-error=format-security"
+cp ~/kernel.config config
 
-        makepkg -s --noconfirm --nodeps --ignorearch --skipinteg
-        '
-        BUILD_EOF
+# 修复 -Wformat-security 被当作错误的问题
+export CFLAGS="${CFLAGS} -Wformat -Wno-error=format-security"
+export CXXFLAGS="${CXXFLAGS} -Wformat -Wno-error=format-security"
+export KCFLAGS="${KCFLAGS} -Wformat -Wno-error=format-security"
+
+makepkg -s --noconfirm --nodeps --ignorearch --skipinteg
+'
+BUILD_EOF
 
         CID=$(docker run -d "$ARCH_IMAGE" sleep infinity)
         echo "Container: $CID"
 
-        docker exec -i -u 0 "$CID" sh -c 'cat > /tmp/build.sh'      < "$STAGE/in/build.sh"
-        docker exec -i -u 0 "$CID" sh -c 'cat > /tmp/kernel.config' < "$STAGE/in/kernel.config"
+        docker cp "$STAGE/in/kernel.config" "$CID:/tmp/kernel.config"
+        docker cp "$STAGE/in/build.sh" "$CID:/tmp/build.sh"
+
+        docker exec -u 0 "$CID" chmod +x /tmp/build.sh
+        docker exec -u 0 "$CID" chmod 644 /tmp/kernel.config
 
         echo "---- container /tmp file check ----"
         docker exec -u 0 "$CID" ls -l /tmp/build.sh /tmp/kernel.config
 
-        docker exec -u 0 "$CID" bash /tmp/build.sh
+        docker exec -u 0 "$CID" /tmp/build.sh
 
         docker cp "$CID:/home/builder/arch-pkg/." "$STAGE/out/"
         docker rm -f "$CID"
