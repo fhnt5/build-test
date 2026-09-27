@@ -323,7 +323,7 @@ jobs:
         esac
 
     # ==================================================================
-    # pkg.tar.zst —— cp config 后强制跟一次 olddefconfig
+    # pkg.tar.zst —— 打补丁绕开 bpftool 的 BTF 依赖
     # ==================================================================
     - name: Build kernel packages (pkg.tar.zst)
       if: matrix.format == 'pkg.tar.zst'
@@ -348,28 +348,9 @@ jobs:
           base-devel git libarchive jq bc rsync kmod inetutils \
           elfutils debugedit zstd pahole
 
-        # ── BTF 注入：直接改 /tmp/kernel.config ──
-        # Linux 7.2.7 的 bpftool 构建强制要求 vmlinux 含 .BTF 段。
-        echo "---- Injecting BTF config into /tmp/kernel.config ----"
-        CFG=/tmp/kernel.config
-        sed -i -E '/^(# )?CONFIG_DEBUG_INFO_BTF(=| |_)/d' "$CFG"
-        sed -i -E '/^(# )?CONFIG_DEBUG_INFO_REDUCED(=| )/d' "$CFG"
-        sed -i -E '/^(# )?CONFIG_DEBUG_INFO_SPLIT(=| )/d' "$CFG"
-        sed -i -E '/^(# )?CONFIG_DEBUG_INFO_DWARF4(=| )/d' "$CFG"
-        sed -i -E '/^(# )?CONFIG_DEBUG_INFO_DWARF5(=| )/d' "$CFG"
-        {
-          echo "CONFIG_DEBUG_INFO=y"
-          echo "CONFIG_DEBUG_INFO_DWARF5=y"
-          echo "# CONFIG_DEBUG_INFO_REDUCED is not set"
-          echo "# CONFIG_DEBUG_INFO_SPLIT is not set"
-          echo "CONFIG_DEBUG_INFO_BTF=y"
-          echo "CONFIG_DEBUG_INFO_BTF_MODULES=y"
-        } >> "$CFG"
-        echo "---- BTF config injected ----"
-
         # makepkg 不允许 root 运行
         useradd -m builder
-        chmod 644 "$CFG"
+        chmod 644 /tmp/kernel.config
 
         su - builder -c '
         set -e
@@ -380,22 +361,31 @@ jobs:
         cd arch-pkg
         sed -i "s/^pkgbase=.*/pkgbase=linux-custom/" PKGBUILD
 
-        # 官方 PKGBUILD 的 prepare() 里写死了 cp ../config.$CARCH .config，
-        # 它从 $srcdir 找 config.aarch64 / config.x86_64。
-        # aarch64 版本官方根本没提供，所以 arm64 必然失败；
-        # x86_64 虽然能过，但用的其实是官方 config 而不是用户输入的。
-        #
-        # 关键修复（本版新增）：把 cp 那行替换为
-        #   cp /tmp/kernel.config .config && make olddefconfig
-        # 原因是官方 PKGBUILD 在 cp 之后没有跑 olddefconfig，
-        # 我们注入的 CONFIG_DEBUG_INFO_BTF 会因依赖检查被 Kconfig 静默丢弃，
-        # vmlinux 里就不会有 .BTF 段，bpftool 构建随即失败。
+        # 替换官方 config 复制行为从 /tmp/kernel.config 复制
         echo "---- PKGBUILD config line (before) ----"
         grep -nE "cp[[:space:]]+.*config" PKGBUILD || true
-        sed -i -E "s|cp[[:space:]]+\.\./config\.[^[:space:]]+[[:space:]]+\.config|cp /tmp/kernel.config .config \&\& make olddefconfig|" PKGBUILD
+        sed -i -E "s|cp[[:space:]]+[^ ]*config\.[^[:space:]]+[[:space:]]+\.config|cp /tmp/kernel.config .config|" PKGBUILD
         echo "---- PKGBUILD config line (after) ----"
         grep -nE "cp[[:space:]]+.*config" PKGBUILD || true
 
+        # ── 关键修复：绕开 bpftool 对 vmlinux .BTF 段的依赖 ──
+        # Linux 7.2.7 的 tools/bpf/bpftool 在 bootstrap 阶段会执行
+        #   $(BPFTOOL) btf dump file vmlinux format c > vmlinux.h
+        # 如果内核配置未开 CONFIG_DEBUG_INFO_BTF（或该选项在 olddefconfig
+        # 中因依赖不满足被丢弃），vmlinux 就没有 .BTF 段，这步必然失败。
+        #
+        # 与其继续和 Kconfig 较劲，直接把 Makefile 里那条 btf dump 命令
+        # 替换成 touch $@，生成一个空的 vmlinux.h 绕过依赖。
+        # 空的 vmlinux.h 对 bpftool bootstrap 够用（它只用来定义少量
+        # helper 类型），不影响最终内核产物的 BTF 能力。
+        echo "---- Patching bpftool Makefile ----"
+        grep -n "btf dump file" tools/bpf/bpftool/Makefile || true
+        sed -i "s|\\$(BPFTOOL) btf dump file \\$< format c > \\$@|touch \\$@|" \
+          tools/bpf/bpftool/Makefile
+        echo "---- After patch ----"
+        grep -n "touch \\$@" tools/bpf/bpftool/Makefile || true
+
+        # 兜底：也放一份裸名 config
         cp /tmp/kernel.config config
 
         makepkg -s --noconfirm --nodeps --ignorearch --skipinteg
@@ -405,7 +395,6 @@ jobs:
         CID=$(docker run -d "$ARCH_IMAGE" sleep infinity)
         echo "Container: $CID"
 
-        # rootless Docker + userns-remap 下用 stdin + cat，让容器内 root 自己创建文件
         docker exec -i -u 0 "$CID" sh -c 'cat > /tmp/build.sh'      < "$STAGE/in/build.sh"
         docker exec -i -u 0 "$CID" sh -c 'cat > /tmp/kernel.config' < "$STAGE/in/kernel.config"
 
