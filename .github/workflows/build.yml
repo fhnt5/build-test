@@ -350,6 +350,17 @@ jobs:
         useradd -m builder
         chmod 644 /tmp/kernel.config
 
+        # 启用 BTF，解决 bpftool 因 vmlinux 缺少 .BTF 段而失败的问题。
+        # PKGBUILD 的 prepare() 会执行 cp /tmp/kernel.config .config，
+        # 所以直接改 /tmp/kernel.config 即可影响内核实际使用的配置。
+        for opt in CONFIG_DEBUG_INFO CONFIG_DEBUG_INFO_BTF CONFIG_DEBUG_INFO_BTF_MODULES; do
+          sed -i "/^# ${opt} is not set/d" /tmp/kernel.config
+          sed -i "/^${opt}=/d" /tmp/kernel.config
+          echo "${opt}=y" >> /tmp/kernel.config
+        done
+        sed -i "/^CONFIG_DEBUG_INFO_NONE=y/d" /tmp/kernel.config
+        echo "# CONFIG_DEBUG_INFO_NONE is not set" >> /tmp/kernel.config
+
         su - builder -c '
         set -e
         cd ~
@@ -367,14 +378,7 @@ jobs:
 
         cp /tmp/kernel.config config
 
-        # ── 关键修复：在容器内启用 BTF ──
-        # 必须在 makepkg 之前，对即将使用的 config 文件进行修改
-        # 以解决 bpftool 因缺少 BTF 信息而构建失败的问题
-        scripts/config --file config \
-          --enable DEBUG_INFO \
-          --enable DEBUG_INFO_BTF \
-          --enable DEBUG_INFO_BTF_MODULES
-
+        # 修复 -Wformat-security 错误
         export CFLAGS="${CFLAGS} -Wno-error=format-security"
         export CXXFLAGS="${CXXFLAGS} -Wno-error=format-security"
 
