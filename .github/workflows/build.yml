@@ -300,10 +300,14 @@ jobs:
         cd kernel-source
         cp "$CONFIG_OUT" .config
 
-        # ── 为 pkg.tar.zst (Arch) 构建启用 BTF ──
-        # Arch 的 PKGBUILD 会构建 bpftool，bpftool 需要从 vmlinux 中
-        # 读取 .BTF 段来生成 vmlinux.h。默认 x86_64_defconfig 没有开启
-        # BTF，会导致 "failed to find '.BTF' ELF section" 错误。
+        # ────────────────────────────────────────────────────────────
+        # 针对 pkg.tar.zst (Arch) 启用 BTF
+        # Arch 的 PKGBUILD 会构建 bpftool，它需要从 vmlinux 中读取
+        # .BTF 段来生成 vmlinux.h。若配置里没有 BTF，会报错：
+        #   libbpf: failed to find '.BTF' ELF section in .../vmlinux
+        #   make: *** [Makefile:255: vmlinux.h] Error 195
+        # 下面三个选项同时适用于 x86_64 和 arm64。
+        # ────────────────────────────────────────────────────────────
         if [ "${{ matrix.format }}" = "pkg.tar.zst" ]; then
           echo "==> Enabling BTF for Arch packaging (required by bpftool)"
           scripts/config --file .config \
@@ -314,8 +318,9 @@ jobs:
 
         make ARCH="$KARCH" olddefconfig
 
-        # 对于 Arch 打包，把最终配置回写到 /tmp/kernel.config，
-        # 因为容器内 PKGBUILD 使用的是 /tmp/kernel.config
+        # pkg.tar.zst 在容器内使用 /tmp/kernel.config 作为配置源，
+        # 把经过 olddefconfig 处理（并启用 BTF）后的最终配置回写，
+        # 确保容器拿到的是最新配置。
         if [ "${{ matrix.format }}" = "pkg.tar.zst" ]; then
           cp .config "$CONFIG_OUT"
         fi
@@ -389,10 +394,9 @@ grep -nE "cp[[:space:]]+.*config" PKGBUILD || true
 
 cp ~/kernel.config config
 
-# 修复 -Wformat-security 被当作错误的问题
-export CFLAGS="${CFLAGS} -Wformat -Wno-error=format-security"
-export CXXFLAGS="${CXXFLAGS} -Wformat -Wno-error=format-security"
-export KCFLAGS="${KCFLAGS} -Wformat -Wno-error=format-security"
+# 修复 -Wformat-security 错误
+export CFLAGS="${CFLAGS} -Wno-error=format-security"
+export CXXFLAGS="${CXXFLAGS} -Wno-error=format-security"
 
 makepkg -s --noconfirm --nodeps --ignorearch --skipinteg
 '
