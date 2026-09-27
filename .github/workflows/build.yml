@@ -323,7 +323,7 @@ jobs:
         esac
 
     # ==================================================================
-    # pkg.tar.zst —— 用一个独立 apply-config.sh 承接所有复杂逻辑
+    # pkg.tar.zst —— 修复 -Wformat-security 错误
     # ==================================================================
     - name: Build kernel packages (pkg.tar.zst)
       if: matrix.format == 'pkg.tar.zst'
@@ -338,58 +338,6 @@ jobs:
         mkdir -p "$STAGE/in" "$STAGE/out"
         cp /tmp/kernel.config "$STAGE/in/kernel.config"
 
-        # ── 独立脚本：复制 config + 注入 BTF + olddefconfig + bpftool 补丁 ──
-        # 之所以单拆一个文件，是因为这些操作全在 PKGBUILD 的 prepare() 内、
-        # 内核源码解压后的目录里执行；把它抽出来单独送进容器，
-        # 就不用在 PKGBUILD 里叠好几层 sed/shell 转义。
-        cat > "$STAGE/in/apply-config.sh" <<'APPLY_EOF'
-        #!/bin/bash
-        set -e
-
-        echo "==> [apply-config] cwd = $(pwd)"
-
-        # 1) 复制用户 config
-        cp /tmp/kernel.config .config
-
-        # 2) 注入 BTF 相关配置（先把所有冲突项清掉）
-        sed -i -E '/^(# )?CONFIG_DEBUG_INFO(=| )/d' .config
-        sed -i -E '/^(# )?CONFIG_DEBUG_INFO_NONE(=| )/d' .config
-        sed -i -E '/^(# )?CONFIG_DEBUG_INFO_BTF(=| |_)/d' .config
-        sed -i -E '/^(# )?CONFIG_DEBUG_INFO_REDUCED(=| )/d' .config
-        sed -i -E '/^(# )?CONFIG_DEBUG_INFO_SPLIT(=| )/d' .config
-        sed -i -E '/^(# )?CONFIG_DEBUG_INFO_DWARF4(=| )/d' .config
-        sed -i -E '/^(# )?CONFIG_DEBUG_INFO_DWARF5(=| )/d' .config
-        {
-          echo "CONFIG_DEBUG_INFO=y"
-          echo "CONFIG_DEBUG_INFO_DWARF5=y"
-          echo "# CONFIG_DEBUG_INFO_REDUCED is not set"
-          echo "# CONFIG_DEBUG_INFO_SPLIT is not set"
-          echo "CONFIG_DEBUG_INFO_BTF=y"
-          echo "CONFIG_DEBUG_INFO_BTF_MODULES=y"
-        } >> .config
-
-        # 3) olddefconfig 归一化，让上面的选项真正生效
-        echo "==> [apply-config] running make olddefconfig"
-        make olddefconfig
-
-        # 4) 打 bpftool Makefile 补丁（兜底，防止 BTF 仍未被 Kconfig 保留）
-        if [ -f tools/bpf/bpftool/Makefile ]; then
-          echo "==> [apply-config] patching tools/bpf/bpftool/Makefile"
-          # 把包含 "btf dump file" 的整行替换为 "\ttouch $@"，
-          # 生成一个空的 vmlinux.h 绕过 .BTF 依赖。
-          sed -i '/btf dump file/s/.*/\ttouch $@/' tools/bpf/bpftool/Makefile
-          echo "---- bpftool Makefile after patch (line with touch) ----"
-          grep -n "touch" tools/bpf/bpftool/Makefile || true
-        else
-          echo "WARN: tools/bpf/bpftool/Makefile not found, skip patch"
-        fi
-
-        # 5) 最终校验
-        echo "==> [apply-config] final config check"
-        grep -E "^CONFIG_DEBUG_INFO_BTF" .config || echo "WARN: BTF still not enabled"
-        echo "==> [apply-config] done"
-        APPLY_EOF
-
         cat > "$STAGE/in/build.sh" <<'BUILD_EOF'
         set -e
 
@@ -401,7 +349,6 @@ jobs:
 
         useradd -m builder
         chmod 644 /tmp/kernel.config
-        chmod 755 /tmp/apply-config.sh
 
         su - builder -c '
         set -e
@@ -412,16 +359,19 @@ jobs:
         cd arch-pkg
         sed -i "s/^pkgbase=.*/pkgbase=linux-custom/" PKGBUILD
 
-        # 把 prepare() 里那行 cp 换成调用 /tmp/apply-config.sh。
-        # 匹配任意 "cp ... config.<arch> .config" 形式。
         echo "---- PKGBUILD config line (before) ----"
-        grep -nE "cp[[:space:]]+.*config\.[^[:space:]]+[[:space:]]+\.config" PKGBUILD || true
-        sed -i -E "s|cp[[:space:]]+[^ ]*config\.[^[:space:]]+[[:space:]]+\.config|bash /tmp/apply-config.sh|" PKGBUILD
+        grep -nE "cp[[:space:]]+.*config" PKGBUILD || true
+        sed -i -E "s|cp[[:space:]]+\.\./config\.[^[:space:]]+[[:space:]]+\.config|cp /tmp/kernel.config .config|" PKGBUILD
         echo "---- PKGBUILD config line (after) ----"
-        grep -nE "apply-config|cp[[:space:]]+.*config" PKGBUILD || true
+        grep -nE "cp[[:space:]]+.*config" PKGBUILD || true
 
-        # 兜底：也放一份裸名 config（以防 PKGBUILD 还有别处引用）
         cp /tmp/kernel.config config
+
+        # ── 修复 -Wformat-security 错误 ──
+        # tools/lib/bpf 的编译过程中，CFLAGS 带了 -Wformat-security 却没带
+        # -Wformat，配合 -Werror 就变成了硬错误。给它降级掉。
+        export CFLAGS="${CFLAGS} -Wno-error=format-security"
+        export CXXFLAGS="${CXXFLAGS} -Wno-error=format-security"
 
         makepkg -s --noconfirm --nodeps --ignorearch --skipinteg
         '
@@ -430,13 +380,11 @@ jobs:
         CID=$(docker run -d "$ARCH_IMAGE" sleep infinity)
         echo "Container: $CID"
 
-        # rootless Docker + userns-remap：用 stdin + cat 让容器内 root 创建文件
-        docker exec -i -u 0 "$CID" sh -c 'cat > /tmp/build.sh'         < "$STAGE/in/build.sh"
-        docker exec -i -u 0 "$CID" sh -c 'cat > /tmp/kernel.config'    < "$STAGE/in/kernel.config"
-        docker exec -i -u 0 "$CID" sh -c 'cat > /tmp/apply-config.sh'  < "$STAGE/in/apply-config.sh"
+        docker exec -i -u 0 "$CID" sh -c 'cat > /tmp/build.sh'      < "$STAGE/in/build.sh"
+        docker exec -i -u 0 "$CID" sh -c 'cat > /tmp/kernel.config' < "$STAGE/in/kernel.config"
 
         echo "---- container /tmp file check ----"
-        docker exec -u 0 "$CID" ls -l /tmp/build.sh /tmp/kernel.config /tmp/apply-config.sh
+        docker exec -u 0 "$CID" ls -l /tmp/build.sh /tmp/kernel.config
 
         docker exec -u 0 "$CID" bash /tmp/build.sh
 
