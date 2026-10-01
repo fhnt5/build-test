@@ -522,10 +522,38 @@ jobs:
         echo "════════════ end diff ════════════"
 
         echo ""
+        echo "════════════ PAHOLE / BTF dependency diagnostics ════════════"
+        echo "[A] scripts/pahole* files:"
+        ls -la "$SRC_DIR"/scripts/pahole* 2>/dev/null || echo "(no pahole* files in scripts/)"
+        echo ""
+        echo "[B] scripts/pahole-version.sh content:"
+        if [ -f "$SRC_DIR/scripts/pahole-version.sh" ]; then
+          cat "$SRC_DIR/scripts/pahole-version.sh"
+        else
+          echo "(file not found)"
+        fi
+        echo ""
+        echo "[C] Direct call of scripts/pahole-version.sh:"
+        if [ -f "$SRC_DIR/scripts/pahole-version.sh" ]; then
+          (cd "$SRC_DIR" && bash scripts/pahole-version.sh pahole 2>&1) || echo "(call failed)"
+        else
+          echo "(file not found, cannot call)"
+        fi
+        echo ""
+        echo "[D] .config PAHOLE_VERSION:"
+        grep -n "PAHOLE" "$SRC_DIR/.config" || echo "(not found)"
+        echo ""
+        echo "[E] lib/Kconfig.debug: DEBUG_INFO_BTF + next config block:"
+        awk '/^config DEBUG_INFO_BTF$/,/^config [A-Z][A-Z_]+$/' "$SRC_DIR/lib/Kconfig.debug" 2>/dev/null | head -40 || echo "(not found)"
+        echo ""
+        echo "[F] lib/Kconfig.debug: PAHOLE_VERSION references:"
+        grep -n "PAHOLE_VERSION" "$SRC_DIR/lib/Kconfig.debug" 2>/dev/null | head -20 || echo "(not found)"
+        echo "════════════ end PAHOLE / BTF diagnostics ════════════"
+
+        echo ""
         echo "════════════ Verifying kconfig AFTER syncconfig ════════════"
         if ! check_kconfig "$SRC_DIR/.config"; then
           echo "FATAL: BTF config was stripped by syncconfig" >&2
-          echo "---- full BTF/DEBUG/EXPERT/KALLSYMS dump after syncconfig ----" >&2
           grep -nE "$KCONF_GREP" "$SRC_DIR/.config" >&2
           exit 1
         fi
