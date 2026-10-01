@@ -409,8 +409,9 @@ jobs:
         CARCH_LOCAL="${CARCH:-$(uname -m)}"
         echo "Container CARCH=$CARCH_LOCAL"
 
-        KCONF_ENABLE="CONFIG_DEBUG_KERNEL CONFIG_DEBUG_INFO CONFIG_DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT CONFIG_DEBUG_INFO_BTF CONFIG_DEBUG_INFO_BTF_MODULES"
+        KCONF_ENABLE="CONFIG_DEBUG_KERNEL CONFIG_DEBUG_INFO CONFIG_DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT CONFIG_DEBUG_INFO_BTF CONFIG_DEBUG_INFO_BTF_MODULES CONFIG_EXPERT"
         KCONF_DISABLE="CONFIG_DEBUG_INFO_NONE CONFIG_DEBUG_INFO_SPLIT CONFIG_DEBUG_INFO_REDUCED CONFIG_GCC_PLUGIN_RANDSTRUCT CONFIG_WERROR CONFIG_LD_ORPHAN_WARN"
+        KCONF_GREP='DEBUG_INFO|BTF|RANDSTRUCT|WERROR|ORPHAN_WARN|DEBUG_KERNEL|EXPERT|KALLSYMS'
 
         fix_kconfig() {
           local f="$1"
@@ -429,8 +430,8 @@ jobs:
         }
 
         dump_kconfig() {
-          echo "──── ${1} (BTF/WERROR lines with numbers) ────"
-          grep -nE 'DEBUG_INFO|BTF|RANDSTRUCT|WERROR|ORPHAN_WARN|DEBUG_KERNEL' "$1" || echo "(no matches)"
+          echo "──── ${1} ────"
+          grep -nE "$KCONF_GREP" "$1" || echo "(no matches)"
           echo "──── end ────"
         }
 
@@ -491,13 +492,15 @@ jobs:
         dump_kconfig "$SRC_DIR/.config"
 
         echo ""
-        echo "════════════ Verifying kconfig ════════════"
+        echo "════════════ Verifying kconfig BEFORE syncconfig ════════════"
         if ! check_kconfig "$SRC_DIR/.config"; then
-          echo "FATAL: kconfig check failed" >&2
-          grep -nE 'DEBUG_INFO|BTF|RANDSTRUCT|WERROR|ORPHAN' "$SRC_DIR/.config" >&2
+          echo "FATAL: kconfig check failed BEFORE syncconfig" >&2
+          grep -nE "$KCONF_GREP" "$SRC_DIR/.config" >&2
           exit 1
         fi
-        echo "kconfig OK."
+        echo "kconfig OK before syncconfig."
+
+        grep -E "$KCONF_GREP" "$SRC_DIR/.config" | sort > /tmp/kconfig-before.txt
 
         case "$(uname -m)" in
           x86_64|amd64) KARCH_SYNC="x86_64" ;;
@@ -508,11 +511,22 @@ jobs:
         echo "════════════ make syncconfig ════════════"
         (cd "$SRC_DIR" && make ARCH="$KARCH_SYNC" syncconfig >/dev/null 2>&1) \
           || echo "WARN: syncconfig returned non-zero"
+
+        grep -E "$KCONF_GREP" "$SRC_DIR/.config" | sort > /tmp/kconfig-after.txt
+
         echo ""
-        echo "════════════ Verifying kconfig after syncconfig ════════════"
+        echo "════════════ DIFF: syncconfig BEFORE vs AFTER ════════════"
+        if diff /tmp/kconfig-before.txt /tmp/kconfig-after.txt; then
+          echo "(no differences)"
+        fi
+        echo "════════════ end diff ════════════"
+
+        echo ""
+        echo "════════════ Verifying kconfig AFTER syncconfig ════════════"
         if ! check_kconfig "$SRC_DIR/.config"; then
           echo "FATAL: BTF config was stripped by syncconfig" >&2
-          grep -nE 'DEBUG_INFO|BTF|RANDSTRUCT|WERROR|ORPHAN' "$SRC_DIR/.config" >&2
+          echo "---- full BTF/DEBUG/EXPERT/KALLSYMS dump after syncconfig ----" >&2
+          grep -nE "$KCONF_GREP" "$SRC_DIR/.config" >&2
           exit 1
         fi
         echo "kconfig still OK after syncconfig."
@@ -527,7 +541,7 @@ jobs:
         echo ""
         echo "════════════ CONTAINER-SIDE DIAGNOSTICS ════════════"
         echo "[1] .config BTF/WERROR lines:"
-        grep -nE 'DEBUG_INFO|BTF|RANDSTRUCT|WERROR|ORPHAN' "$SRC_DIR/.config" || echo "(none)"
+        grep -nE "$KCONF_GREP" "$SRC_DIR/.config" || echo "(none)"
         echo ""
         echo "[2] vmlinux files:"
         ls -la "$SRC_DIR"/vmlinux* 2>/dev/null || echo "(no vmlinux files)"
