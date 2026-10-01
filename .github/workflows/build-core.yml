@@ -90,6 +90,7 @@ jobs:
               echo "rpm_arch=x86_64" >> "$GITHUB_OUTPUT"
               echo "arch_name=x86_64"  >> "$GITHUB_OUTPUT"
               echo "image=arch/x86/boot/bzImage" >> "$GITHUB_OUTPUT"
+              echo "src_arch=x86"    >> "$GITHUB_OUTPUT"
               ;;
             arm64|aarch64)
               echo "karch=arm64"      >> "$GITHUB_OUTPUT"
@@ -97,6 +98,7 @@ jobs:
               echo "rpm_arch=aarch64"  >> "$GITHUB_OUTPUT"
               echo "arch_name=arm64"  >> "$GITHUB_OUTPUT"
               echo "image=arch/arm64/boot/Image" >> "$GITHUB_OUTPUT"
+              echo "src_arch=arm64"   >> "$GITHUB_OUTPUT"
               ;;
             *)
               echo "不支持的架构: ${{ inputs.arch }}" >&2
@@ -201,10 +203,16 @@ jobs:
           cp "$OUT" .config
 
           # 必选项：无论是否严格模式都要保证，否则链接期直接失败
-          grep -q '^CONFIG_LD_ORPHAN_WARN_LEVEL=' .config \
-            || echo 'CONFIG_LD_ORPHAN_WARN_LEVEL="warn"' >> .config
-          grep -q '^CONFIG_LOCALVERSION_AUTO=' .config \
-            || echo 'CONFIG_LOCALVERSION_AUTO=y' >> .config
+          # 注意：用 "if ! grep" 而不是 "grep || echo"，避免在已有
+          # "# CONFIG_XXX is not set" 时追加出重复行。
+          if ! grep -q '^CONFIG_LD_ORPHAN_WARN_LEVEL=' .config; then
+            sed -i '/^# CONFIG_LD_ORPHAN_WARN_LEVEL is not set/d' .config
+            echo 'CONFIG_LD_ORPHAN_WARN_LEVEL="warn"' >> .config
+          fi
+          if ! grep -q '^CONFIG_LOCALVERSION_AUTO=' .config; then
+            sed -i '/^# CONFIG_LOCALVERSION_AUTO is not set/d' .config
+            echo 'CONFIG_LOCALVERSION_AUTO=y' >> .config
+          fi
 
           if [ "${{ inputs.respect_config }}" != "true" ]; then
             make ARCH="$KARCH" olddefconfig </dev/null
@@ -217,12 +225,16 @@ jobs:
           cd kernel-source
           KARCH="${{ steps.arch.outputs.karch }}"
 
+          # set_yes / set_no 都必须同时删除正向行和反向行，
+          # 否则会出现 "CONFIG_X=y" 与 "# CONFIG_X is not set" 并存。
           set_yes() {
             sed -i "/^CONFIG_$1=/d" .config
+            sed -i "/^# CONFIG_$1 is not set/d" .config
             echo "CONFIG_$1=y" >> .config
           }
           set_no() {
             sed -i "/^CONFIG_$1=/d" .config
+            sed -i "/^# CONFIG_$1 is not set/d" .config
             echo "# CONFIG_$1 is not set" >> .config
           }
 
@@ -360,9 +372,7 @@ jobs:
           fi
           rm -f "$STAGE/lib/modules/${KVER}/build" "$STAGE/lib/modules/${KVER}/source"
 
-          # 关键：用 GITHUB_OUTPUT（不是 GITHUB_ENV）跨 step 传值。
-          # GITHUB_ENV 是环境变量命名空间，set -u 下 $STAGE 在当前 shell 未定义
-          # 会直接报 "STAGE: unbound variable"
+          # 用 GITHUB_OUTPUT（不是 GITHUB_ENV）跨 step 传值。
           echo "STAGE=$STAGE" >> "$GITHUB_OUTPUT"
           echo "KVER=$KVER"   >> "$GITHUB_OUTPUT"
 
@@ -373,6 +383,7 @@ jobs:
           set -euo pipefail
           cd kernel-source
           KARCH="${{ steps.arch.outputs.karch }}"
+          SRC_ARCH="${{ steps.arch.outputs.src_arch }}"
           KVER="${{ steps.compile.outputs.KVER }}"
           HDR="$(mktemp -d)"
 
@@ -388,7 +399,9 @@ jobs:
               [ -d "scripts/$d" ] && cp -a "scripts/$d" "$DEST/scripts/"
             done
             mkdir -p "$DEST/arch"
-            cp -a "arch/$KARCH" "$DEST/arch/"
+            # 关键：内核源码里 x86_64 的目录名是 arch/x86，不是 arch/x86_64。
+            # 用 src_arch（由设置架构变量 step 提供）做映射，arm64 恰好同名。
+            cp -a "arch/$SRC_ARCH" "$DEST/arch/"
           fi
           for f in Makefile .config Module.symvers Kbuild; do
             [ -f "$f" ] && cp "$f" "$DEST/"
@@ -414,9 +427,6 @@ jobs:
           cp "$STAGE/boot/config-${KVER}"  "$IMG/boot/"
           cp -a "$STAGE/lib/modules/${KVER}" "$IMG/lib/modules/"
 
-          # 控制文件一律逐行 printf，不用 heredoc。
-          # 原因：heredoc 结束标记在 YAML 块标量里若带缩进，bash 匹配不到，
-          #       报 "delimited by end-of-file (wanted XXX)"，进而 syntax error
           write_control() {
             local F="$1"; shift
             printf '%s\n' "$@" > "$F"
@@ -468,8 +478,6 @@ jobs:
           OUT="dist/${{ steps.arch.outputs.arch_name }}/rpm"
           mkdir -p "$OUT"
 
-          # spec 用 printf 数组逐行生成，占位符（大写）写完再 sed 替换。
-          # 彻底规避三类 YAML 雷：heredoc 结束标记 / 多行字符串 / 反斜杠续行
           write_spec() {
             local SPEC="$1"; local NAME="$2"; local SUMMARY="$3"
             local I1="$4"; local I2="$5"; local I3="$6"
@@ -545,6 +553,7 @@ jobs:
           STAGE="${{ steps.stage.outputs.STAGE }}"
           OUT="dist/${ARCH_NAME}/tarxz"
           mkdir -p "$OUT"
+          ABS_OUT="$(pwd)/$OUT"
           PKG_NAME="linux-${KVER}-${ARCH_NAME}"
           PKG="$(mktemp -d)/${PKG_NAME}"
           mkdir -p "$PKG/boot" "$PKG/lib/modules"
@@ -561,7 +570,6 @@ jobs:
             cp -a "$HDR/usr/src/linux-headers-${KVER}" "$PKG/usr/src/"
           fi
 
-          # install 脚本内所有 $ 前加 \ 转义，避免被 GitHub Actions 的 ${{ }} 解析误伤
           printf '%s\n' \
             '#!/bin/sh' \
             'set -e' \
@@ -575,11 +583,9 @@ jobs:
             > "$PKG/install-${KVER}.sh"
           chmod 755 "$PKG/install-${KVER}.sh"
 
-          # 拆成 cd + tar 两步，不用 ( ... ) 子 shell：
-          # 子 shell 在 YAML 块标量里会被误判为列表开始
           cd "$(dirname "$PKG")"
           tar --owner=0 --group=0 --numeric-owner \
-            -cJf "$OLDPWD/$OUT/${PKG_NAME}.tar.xz" "$PKG_NAME"
+            -cJf "$ABS_OUT/${PKG_NAME}.tar.xz" "$PKG_NAME"
 
       - name: 打包 pkg.tar.zst
         if: ${{ contains(fromJSON(inputs.formats), 'pkg') }}
@@ -590,6 +596,10 @@ jobs:
           STAGE="${{ steps.stage.outputs.STAGE }}"
           OUT="dist/${ARCH_NAME}/pkg"
           mkdir -p "$OUT"
+          # 必须在任何 cd 之前把输出目录转成绝对路径：
+          # 本步骤会两次 cd（先到 $IMG 再到 $H），第二次 cd 时 $OLDPWD 已不是
+          # workspace，用 "$OLDPWD/$OUT" 会把 headers 包写到临时目录里丢失。
+          ABS_OUT="$(pwd)/$OUT"
 
           IMG="$(mktemp -d)"
           mkdir -p "$IMG/boot" "$IMG/lib/modules"
@@ -612,7 +622,7 @@ jobs:
           cd "$IMG"
           tar --owner=0 --group=0 --numeric-owner -cf - . \
             | zstd -T0 -19 --force \
-            -o "$OLDPWD/$OUT/linux-image-${KVER}-${ARCH_NAME}.pkg.tar.zst"
+            -o "$ABS_OUT/linux-image-${KVER}-${ARCH_NAME}.pkg.tar.zst"
 
           if [ "${{ inputs.include_headers }}" = "true" ]; then
             HDR="${{ steps.headers.outputs.HDR }}"
@@ -627,21 +637,45 @@ jobs:
             cd "$H"
             tar --owner=0 --group=0 --numeric-owner -cf - . \
               | zstd -T0 -19 --force \
-              -o "$OLDPWD/$OUT/linux-headers-${KVER}-${ARCH_NAME}.pkg.tar.zst"
+              -o "$ABS_OUT/linux-headers-${KVER}-${ARCH_NAME}.pkg.tar.zst"
           fi
 
-      - name: 按架构分别上传制品
-        # 关键：不能把四个格式的产出合成一个 artifact。
-        # strategy.matrix 会产生 x86_64 与 arm64 两个独立 job，跑在不同 runner。
-        # 若共用一个 artifact 名，下载 x86_64 的 rpm 会被迫连带下载 arm64 的 GB 级产物。
-        if: ${{ always() && !cancelled() }}
-        strategy:
-          matrix:
-            fmt: [deb, rpm, tarxz, pkg]
+      # 逐个格式各用一个 step 上传。
+      # 不能用 step 级 strategy.matrix —— strategy 是 job 级关键词，
+      # 写在 step 里会被 workflow 校验直接拒绝。
+      - name: 上传 deb 制品
+        if: ${{ always() && !cancelled() && contains(fromJSON(inputs.formats), 'deb') }}
         uses: actions/upload-artifact@v4
         with:
-          name: kernel-${{ steps.arch.outputs.arch_name }}-${{ matrix.fmt }}
-          path: dist/${{ steps.arch.outputs.arch_name }}/${{ matrix.fmt }}/**/*
+          name: kernel-${{ steps.arch.outputs.arch_name }}-deb
+          path: dist/${{ steps.arch.outputs.arch_name }}/deb/**/*
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: 上传 rpm 制品
+        if: ${{ always() && !cancelled() && contains(fromJSON(inputs.formats), 'rpm') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-${{ steps.arch.outputs.arch_name }}-rpm
+          path: dist/${{ steps.arch.outputs.arch_name }}/rpm/**/*
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: 上传 tarxz 制品
+        if: ${{ always() && !cancelled() && contains(fromJSON(inputs.formats), 'tarxz') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-${{ steps.arch.outputs.arch_name }}-tarxz
+          path: dist/${{ steps.arch.outputs.arch_name }}/tarxz/**/*
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: 上传 pkg 制品
+        if: ${{ always() && !cancelled() && contains(fromJSON(inputs.formats), 'pkg') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-${{ steps.arch.outputs.arch_name }}-pkg
+          path: dist/${{ steps.arch.outputs.arch_name }}/pkg/**/*
           if-no-files-found: warn
           retention-days: 7
 
