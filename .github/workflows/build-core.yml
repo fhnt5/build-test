@@ -54,7 +54,7 @@ on:
 
 jobs:
   build:
-    runs-on: ${{ inputs.arch == 'arm64' && fromJSON('"ubuntu-24.04-arm"') || 'ubuntu-latest' }}
+    runs-on: ${{ inputs.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
     timeout-minutes: 360
     steps:
       - uses: actions/checkout@v4
@@ -176,24 +176,24 @@ jobs:
             sed -i '/^CONFIG_LD_ORPHAN_WARN_LEVEL=/d' .config
             echo 'CONFIG_LD_ORPHAN_WARN_LEVEL="warn"' >> .config
             make ARCH="$KARCH" olddefconfig </dev/null
+          else
+            grep -q '^CONFIG_LD_ORPHAN_WARN_LEVEL=' .config || echo 'CONFIG_LD_ORPHAN_WARN_LEVEL="warn"' >> .config
+            grep -q '^CONFIG_LOCALVERSION_AUTO=' .config || echo 'CONFIG_LOCALVERSION_AUTO=y' >> .config
           fi
 
       - name: 应用调优预设
+        if: ${{ inputs.respect_config != true }}
         run: |
           set -euo pipefail
           cd kernel-source
-          KARCH="${{ steps.arch.outputs.karch }}"
-          TWEAKED=false
 
           case "${{ inputs.tune_profile }}" in
             performance)
-              TWEAKED=true
               for c in NO_HZ_FULL RCU_NOCBS PREEMPT_DYNAMIC CPU_FREQ_DEFAULT_GOV_PERFORMANCE; do
                 sed -i "/^CONFIG_${c}=/d" .config
                 echo "CONFIG_${c}=y" >> .config
               done
-              for c in MITIGATION_RETPOLINE MITIGATION_SPECTRE_BHI MITIGATION_IBPB_ENTRY \
-                        MITIGATION_IBRS_ENTRY MITIGATION_L1TF MITIGATION_PTI; do
+              for c in MITIGATION_RETPOLINE MITIGATION_SPECTRE_BHI MITIGATION_IBPB_ENTRY MITIGATION_IBRS_ENTRY MITIGATION_L1TF MITIGATION_PTI; do
                 sed -i "/^CONFIG_${c}=/d" .config
                 echo "# CONFIG_${c} is not set" >> .config
               done
@@ -201,8 +201,6 @@ jobs:
               echo "# CONFIG_CPU_FREQ_DEFAULT_GOV_ONDEMAND is not set" >> .config
               ;;
             lowlatency)
-              TWEAKED=true
-              sed -i '/^CONFIG_PREEMPT=/d' .config
               sed -i '/^CONFIG_PREEMPT_VOLUNTARY=/d' .config
               sed -i '/^CONFIG_PREEMPT_NONE=/d' .config
               echo "CONFIG_PREEMPT=y" >> .config
@@ -214,7 +212,6 @@ jobs:
               echo "CONFIG_RCU_BOOST=y" >> .config
               ;;
             minimal)
-              TWEAKED=true
               sed -i '/^CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE=/d' .config
               echo "CONFIG_CC_OPTIMIZE_FOR_SIZE=y" >> .config
               for c in MODULE_SIG MODULE_SIG_ALL MODULE_SIG_FORCE; do
@@ -223,23 +220,13 @@ jobs:
               done
               ;;
             debugoff)
-              TWEAKED=true
-              for c in KASAN KMSAN KCSAN KFENCE KMEMLEAK DEBUG_INFO DWARF_TOOLCHAIN_DEFAULT \
-                        FTRACE FUNCTION_TRACER FUNCTION_GRAPH_TRACER STACK_TRACER \
-                        KPROBES UPROBES TRACEPOINTS DEBUG_FS SLUB_DEBUG \
-                        DEBUG_PAGEALLOC DEBUG_KMEMLEAK DEBUG_STACK_USAGE \
-                        SCHEDSTATS LATENCYTOP LOCK_STAT; do
+              for c in KASAN KMSAN KCSAN KFENCE KMEMLEAK DEBUG_INFO DWARF_TOOLCHAIN_DEFAULT FTRACE FUNCTION_TRACER FUNCTION_GRAPH_TRACER STACK_TRACER KPROBES UPROBES TRACEPOINTS DEBUG_FS SLUB_DEBUG DEBUG_PAGEALLOC DEBUG_KMEMLEAK DEBUG_STACK_USAGE SCHEDSTATS LATENCYTOP LOCK_STAT; do
                 sed -i "/^CONFIG_${c}=/d" .config
                 echo "# CONFIG_${c} is not set" >> .config
               done
               ;;
             default)
-              TWEAKED=true
-              for c in DEBUG_BUGVERBOSE DEBUG_LIST DEBUG_SG DEBUG_NOTIFIERS DEBUG_CREDENTIALS \
-                        RCU_TRACE SCHED_DEBUG PRINTK_TIME DYNAMIC_DEBUG DEBUG_ATOMIC_SLEEP \
-                        DEBUG_PREEMPT DEBUG_SPINLOCK DEBUG_MUTEXES DEBUG_RT_MUTEXES \
-                        DEBUG_WW_MUTEX_SLOWPATH DEBUG_LOCK_ALLOC DEBUG_LOCKDEP \
-                        DEBUG_KOBJECT DEBUG_KOBJECT_RELEASE; do
+              for c in DEBUG_BUGVERBOSE DEBUG_LIST DEBUG_SG DEBUG_NOTIFIERS DEBUG_CREDENTIALS RCU_TRACE SCHED_DEBUG PRINTK_TIME DYNAMIC_DEBUG DEBUG_ATOMIC_SLEEP DEBUG_PREEMPT DEBUG_SPINLOCK DEBUG_MUTEXES DEBUG_RT_MUTEXES DEBUG_WW_MUTEX_SLOWPATH DEBUG_LOCK_ALLOC DEBUG_LOCKDEP DEBUG_KOBJECT DEBUG_KOBJECT_RELEASE; do
                 sed -i "/^CONFIG_${c}=/d" .config
                 echo "# CONFIG_${c} is not set" >> .config
               done
@@ -248,9 +235,41 @@ jobs:
               ;;
           esac
 
-          if [ "$TWEAKED" = "true" ] && [ "${{ inputs.respect_config }}" != "true" ]; then
-            make ARCH="$KARCH" olddefconfig </dev/null
+      - name: 应用 LTO
+        if: ${{ inputs.respect_config != true }}
+        run: |
+          set -euo pipefail
+          cd kernel-source
+          LTO="${{ inputs.lto_mode }}"
+          if [ "$LTO" = "none" ]; then
+            sed -i '/^CONFIG_LTO=/d' .config
+            sed -i '/^CONFIG_LTO_CLANG_FULL=/d' .config
+            sed -i '/^CONFIG_LTO_CLANG_THIN=/d' .config
+            echo "CONFIG_LTO_NONE=y" >> .config
+          else
+            sed -i '/^CONFIG_LTO=/d' .config
+            echo "CONFIG_LTO=y" >> .config
+            sed -i '/^CONFIG_LTO_NONE=/d' .config
+            echo "# CONFIG_LTO_NONE is not set" >> .config
+            if [ "$LTO" = "full" ]; then
+              sed -i '/^CONFIG_LTO_CLANG_FULL=/d' .config
+              echo "CONFIG_LTO_CLANG_FULL=y" >> .config
+              sed -i '/^CONFIG_LTO_CLANG_THIN=/d' .config
+              echo "# CONFIG_LTO_CLANG_THIN is not set" >> .config
+            else
+              sed -i '/^CONFIG_LTO_CLANG_THIN=/d' .config
+              echo "CONFIG_LTO_CLANG_THIN=y" >> .config
+              sed -i '/^CONFIG_LTO_CLANG_FULL=/d' .config
+              echo "# CONFIG_LTO_CLANG_FULL is not set" >> .config
+            fi
           fi
+
+      - name: 收敛配置
+        if: ${{ inputs.respect_config != true }}
+        run: |
+          set -euo pipefail
+          cd kernel-source
+          make ARCH="${{ steps.arch.outputs.karch }}" olddefconfig </dev/null
 
       - name: 编译内核
         run: |
@@ -274,17 +293,6 @@ jobs:
           LTO="${{ inputs.lto_mode }}"
           if [ "$LTO" != "none" ]; then
             MAKE_ARGS="$MAKE_ARGS LLVM=1"
-            sed -i '/^CONFIG_LTO=/d' .config
-            echo "CONFIG_LTO=y" >> .config
-            if [ "$LTO" = "full" ]; then
-              sed -i '/^CONFIG_LTO_CLANG_FULL=/d' .config
-              echo "CONFIG_LTO_CLANG_FULL=y" >> .config
-            else
-              sed -i '/^CONFIG_LTO_CLANG_THIN=/d' .config
-              echo "CONFIG_LTO_CLANG_THIN=y" >> .config
-            fi
-            sed -i '/^CONFIG_LTO_NONE=/d' .config
-            echo "# CONFIG_LTO_NONE is not set" >> .config
           fi
 
           make $MAKE_ARGS
@@ -316,7 +324,7 @@ jobs:
           rm -f "$STAGE_DIR/lib/modules/${KVER}/build" "$STAGE_DIR/lib/modules/${KVER}/source"
 
       - name: 暂存 headers
-        if: inputs.include_headers == 'true'
+        if: ${{ inputs.include_headers == 'true' }}
         run: |
           set -euo pipefail
           cd kernel-source
@@ -347,7 +355,7 @@ jobs:
           cp Makefile .config Module.symvers Kbuild "$HDR_DIR/" 2>/dev/null || true
 
       - name: 打包 deb
-        if: contains(fromJSON(inputs.formats), 'deb')
+        if: ${{ contains(fromJSON(inputs.formats), 'deb') }}
         run: |
           set -euo pipefail
           DEB_ARCH="${{ steps.arch.outputs.deb_arch }}"
@@ -355,19 +363,18 @@ jobs:
 
           IMG_DIR="$(mktemp -d)/linux-image-${KVER}"
           mkdir -p "$IMG_DIR/DEBIAN" "$IMG_DIR/boot" "$IMG_DIR/lib/modules"
-          cp "$STAGE/boot/vmlinuz-${KVER}" "$IMG_DIR/boot/vmlinuz-${KVER}" 2>/dev/null || \
-            cp "$STAGE/boot/"vmlinuz* "$IMG_DIR/boot/vmlinuz-${KVER}"
+          cp "$STAGE/boot/vmlinuz-${KVER}" "$IMG_DIR/boot/vmlinuz-${KVER}" 2>/dev/null || cp "$STAGE/boot/"vmlinuz* "$IMG_DIR/boot/vmlinuz-${KVER}"
           cp "$STAGE/boot/System.map-${KVER}" "$IMG_DIR/boot/"
           cp "$STAGE/boot/config-${KVER}" "$IMG_DIR/boot/"
           cp -a "$STAGE/lib/modules/${KVER}" "$IMG_DIR/lib/modules/"
 
-          cat > "$IMG_DIR/DEBIAN/control" <<CONTROL_EOF
-          Package: linux-image-${KVER}
-          Version: 1
-          Architecture: ${DEB_ARCH}
-          Maintainer: CI
-          Description: Linux kernel ${KVER}
-          CONTROL_EOF
+          {
+            echo "Package: linux-image-${KVER}"
+            echo "Version: 1"
+            echo "Architecture: ${DEB_ARCH}"
+            echo "Maintainer: CI"
+            echo "Description: Linux kernel ${KVER}"
+          } > "$IMG_DIR/DEBIAN/control"
 
           echo '#!/bin/sh' > "$IMG_DIR/DEBIAN/postinst"
           echo "depmod ${KVER} || true" >> "$IMG_DIR/DEBIAN/postinst"
@@ -380,19 +387,19 @@ jobs:
             mkdir -p "$HDR_DIR/DEBIAN" "$HDR_DIR/usr/src/linux-headers-${KVER}"
             cp -a "$HDR_STAGE/usr/src/linux-headers-${KVER}/." "$HDR_DIR/usr/src/linux-headers-${KVER}/"
 
-            cat > "$HDR_DIR/DEBIAN/control" <<CONTROL_EOF
-            Package: linux-headers-${KVER}
-            Version: 1
-            Architecture: ${DEB_ARCH}
-            Maintainer: CI
-            Description: Headers for ${KVER}
-            CONTROL_EOF
+            {
+              echo "Package: linux-headers-${KVER}"
+              echo "Version: 1"
+              echo "Architecture: ${DEB_ARCH}"
+              echo "Maintainer: CI"
+              echo "Description: Headers for ${KVER}"
+            } > "$HDR_DIR/DEBIAN/control"
 
             dpkg-deb --root-owner-group --build "$HDR_DIR" "dist/deb/linux-headers-${KVER}_${DEB_ARCH}.deb"
           fi
 
       - name: 打包 rpm
-        if: contains(fromJSON(inputs.formats), 'rpm')
+        if: ${{ contains(fromJSON(inputs.formats), 'rpm') }}
         run: |
           set -euo pipefail
           RPM_ARCH="${{ steps.arch.outputs.rpm_arch }}"
@@ -404,20 +411,20 @@ jobs:
           RPM_TOPDIR="$(mktemp -d)"
           mkdir -p "$RPM_TOPDIR"/{BUILD,RPMS,SOURCES,SPECS,BUILDROOT}
 
-          cat > "$RPM_TOPDIR/SPECS/kernel-image.spec" <<SPEC_EOF
+          cat > "$RPM_TOPDIR/SPECS/kernel-image.spec" <<'SPEC_EOF'
           %global debug_package %{nil}
           %global __strip /bin/true
           %global __find_provides %{nil}
           %global __find_requires %{nil}
           %define _unpackaged_files_terminate_build 0
 
-          Name: kernel-image-${KVER}
-          Version: ${RPM_VER}
-          Release: ${RPM_REL}
-          Summary: Linux kernel ${KVER}
+          Name: kernel-image-KVER
+          Version: RPM_VER
+          Release: RPM_REL
+          Summary: Linux kernel KVER
           License: GPL-2.0-only
           AutoReqProv: no
-          BuildArch: ${RPM_ARCH}
+          BuildArch: RPM_ARCH
 
           %description
           Kernel image and modules
@@ -425,10 +432,143 @@ jobs:
           %install
           rm -rf %{buildroot}
           mkdir -p %{buildroot}/boot %{buildroot}/lib/modules
-          cp ${STAGE}/boot/vmlinuz-${KVER} %{buildroot}/boot/ 2>/dev/null || :
-          cp ${STAGE}/boot/System.map-${KVER} %{buildroot}/boot/ 2>/dev/null || :
-          cp ${STAGE}/boot/config-${KVER} %{buildroot}/boot/ 2>/dev/null || :
-          cp -a ${STAGE}/lib/modules/${KVER} %{buildroot}/lib/modules/ 2>/dev/null || :
+          cp STAGE/boot/vmlinuz-KVER %{buildroot}/boot/ 2>/dev/null || :
+          cp STAGE/boot/System.map-KVER %{buildroot}/boot/ 2>/dev/null || :
+          cp STAGE/boot/config-KVER %{buildroot}/boot/ 2>/dev/null || :
+          cp -a STAGE/lib/modules/KVER %{buildroot}/lib/modules/ 2>/dev/null || :
 
           %files
-          /boot/vmlinuz-${
+          /boot/vmlinuz-KVER
+          /boot/System.map-KVER
+          /boot/config-KVER
+          /lib/modules/KVER
+          SPEC_EOF
+
+          sed -i "s|KVER|${KVER}|g" "$RPM_TOPDIR/SPECS/kernel-image.spec"
+          sed -i "s|RPM_VER|${RPM_VER}|g" "$RPM_TOPDIR/SPECS/kernel-image.spec"
+          sed -i "s|RPM_REL|${RPM_REL}|g" "$RPM_TOPDIR/SPECS/kernel-image.spec"
+          sed -i "s|RPM_ARCH|${RPM_ARCH}|g" "$RPM_TOPDIR/SPECS/kernel-image.spec"
+          sed -i "s|STAGE|${STAGE}|g" "$RPM_TOPDIR/SPECS/kernel-image.spec"
+
+          if [ "${{ inputs.include_headers }}" = "true" ]; then
+            cat > "$RPM_TOPDIR/SPECS/kernel-headers.spec" <<'SPEC_EOF'
+            %global debug_package %{nil}
+            %global __strip /bin/true
+            %global __find_provides %{nil}
+            %global __find_requires %{nil}
+            %define _unpackaged_files_terminate_build 0
+
+            Name: kernel-headers-KVER
+            Version: RPM_VER
+            Release: RPM_REL
+            Summary: Headers for KVER
+            License: GPL-2.0-only
+            AutoReqProv: no
+            BuildArch: RPM_ARCH
+
+            %install
+            rm -rf %{buildroot}
+            mkdir -p %{buildroot}/usr/src/linux-headers-KVER
+            cp -a HDR_STAGE/usr/src/linux-headers-KVER/. %{buildroot}/usr/src/linux-headers-KVER/
+
+            %files
+            /usr/src/linux-headers-KVER
+            SPEC_EOF
+
+            sed -i "s|KVER|${KVER}|g" "$RPM_TOPDIR/SPECS/kernel-headers.spec"
+            sed -i "s|RPM_VER|${RPM_VER}|g" "$RPM_TOPDIR/SPECS/kernel-headers.spec"
+            sed -i "s|RPM_REL|${RPM_REL}|g" "$RPM_TOPDIR/SPECS/kernel-headers.spec"
+            sed -i "s|RPM_ARCH|${RPM_ARCH}|g" "$RPM_TOPDIR/SPECS/kernel-headers.spec"
+            sed -i "s|HDR_STAGE|${HDR_STAGE}|g" "$RPM_TOPDIR/SPECS/kernel-headers.spec"
+
+            rpmbuild --define "_topdir $RPM_TOPDIR" -bb "$RPM_TOPDIR/SPECS/kernel-headers.spec"
+          fi
+
+          rpmbuild --define "_topdir $RPM_TOPDIR" -bb "$RPM_TOPDIR/SPECS/kernel-image.spec"
+          mkdir -p dist/rpm
+          find "$RPM_TOPDIR/RPMS" -name '*.rpm' -exec cp {} dist/rpm/ \;
+
+      - name: 打包 tar.xz
+        if: ${{ contains(fromJSON(inputs.formats), 'tarxz') }}
+        run: |
+          set -euo pipefail
+          ARCH="${{ inputs.arch }}"
+          PKG_ROOT="$(mktemp -d)/linux-${KVER}-${ARCH}"
+          mkdir -p "$PKG_ROOT/boot" "$PKG_ROOT/lib/modules"
+
+          cp "$STAGE/boot/vmlinuz-${KVER}" "$PKG_ROOT/boot/vmlinuz-${KVER}" 2>/dev/null || cp "$STAGE/boot/"vmlinuz* "$PKG_ROOT/boot/vmlinuz-${KVER}"
+          cp "$STAGE/boot/System.map-${KVER}" "$PKG_ROOT/boot/"
+          cp "$STAGE/boot/config-${KVER}" "$PKG_ROOT/boot/"
+          cp -a "$STAGE/lib/modules/${KVER}" "$PKG_ROOT/lib/modules/"
+
+          if [ "${{ inputs.include_headers }}" = "true" ] && [ "${{ inputs.tarxz_include_headers }}" = "true" ]; then
+            mkdir -p "$PKG_ROOT/usr/src"
+            cp -a "$HDR_STAGE/usr/src/linux-headers-${KVER}" "$PKG_ROOT/usr/src/"
+          fi
+
+          {
+            echo '#!/bin/sh'
+            echo 'set -e'
+            echo '[ "$(id -u)" = "0" ] || { echo "请 root 运行" >&2; exit 1; }'
+            echo 'mkdir -p /boot'
+            echo "cp -a \"$PKG_ROOT/boot/\"* /boot/ 2>/dev/null || true"
+            echo "cp -a \"$PKG_ROOT/lib/modules/${KVER}\" /lib/modules/ 2>/dev/null || true"
+            echo "if [ -d \"$PKG_ROOT/usr/src/linux-headers-${KVER}\" ]; then"
+            echo "  cp -a \"$PKG_ROOT/usr/src/linux-headers-${KVER}\" /usr/src/"
+            echo 'fi'
+            echo "depmod ${KVER} 2>/dev/null || true"
+            echo 'echo "完成"'
+          } > "$PKG_ROOT/install-${KVER}.sh"
+          chmod 755 "$PKG_ROOT/install-${KVER}.sh"
+
+          mkdir -p dist/tarxz
+          cd "$(dirname "$PKG_ROOT")" && tar --owner=0 --group=0 --numeric-owner -cJf "$OLDPWD/dist/tarxz/linux-${KVER}-${ARCH}.tar.xz" "$(basename "$PKG_ROOT")"
+
+      - name: 打包 pkg.tar.zst
+        if: ${{ contains(fromJSON(inputs.formats), 'pkg') }}
+        run: |
+          set -euo pipefail
+          ARCH="${{ inputs.arch }}"
+
+          IMG_ROOT="$(mktemp -d)"
+          mkdir -p "$IMG_ROOT/boot" "$IMG_ROOT/lib/modules"
+          cp "$STAGE/boot/vmlinuz-${KVER}" "$IMG_ROOT/boot/vmlinuz-${KVER}" 2>/dev/null || cp "$STAGE/boot/"vmlinuz* "$IMG_ROOT/boot/vmlinuz-${KVER}"
+          cp "$STAGE/boot/System.map-${KVER}" "$IMG_ROOT/boot/"
+          cp "$STAGE/boot/config-${KVER}" "$IMG_ROOT/boot/"
+          cp -a "$STAGE/lib/modules/${KVER}" "$IMG_ROOT/lib/modules/"
+
+          {
+            echo "pkgname = linux-image-${KVER}"
+            echo "pkgver = ${KVER}-1"
+            echo "arch = ${ARCH}"
+            echo "license = GPL-2.0-only"
+          } > "$IMG_ROOT/.PKGINFO"
+
+          mkdir -p dist/pkg
+          cd "$IMG_ROOT" && tar --owner=0 --group=0 --numeric-owner -cf - . | zstd -T0 -19 -o "$OLDPWD/dist/pkg/linux-image-${KVER}-${ARCH}.pkg.tar.zst" -f
+
+          if [ "${{ inputs.include_headers }}" = "true" ]; then
+            HDR_ROOT="$(mktemp -d)"
+            mkdir -p "$HDR_ROOT/usr/src/linux-headers-${KVER}"
+            cp -a "$HDR_STAGE/usr/src/linux-headers-${KVER}/." "$HDR_ROOT/usr/src/linux-headers-${KVER}/"
+            {
+              echo "pkgname = linux-headers-${KVER}"
+              echo "pkgver = ${KVER}-1"
+              echo "arch = ${ARCH}"
+              echo "license = GPL-2.0-only"
+            } > "$HDR_ROOT/.PKGINFO"
+            cd "$HDR_ROOT" && tar --owner=0 --group=0 --numeric-owner -cf - . | zstd -T0 -19 -o "$OLDPWD/dist/pkg/linux-headers-${KVER}-${ARCH}.pkg.tar.zst" -f
+          fi
+
+      - name: 上传制品
+        if: ${{ always() && !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-${{ inputs.arch }}-${{ github.run_id }}
+          path: dist/**/*
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: 统计产物大小
+        if: ${{ always() && !cancelled() }}
+        run: find dist -type f -exec ls -lh {} \; 2>/dev/null || true
