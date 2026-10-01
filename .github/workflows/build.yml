@@ -12,11 +12,11 @@ on:
         type: boolean
         default: false
       x86_64_tarxz:
-        description: '构建 x86_64 tar.xz 包'
+        description: '构建 x86_64 tar.xz 通用包'
         type: boolean
         default: false
       x86_64_pkg:
-        description: '构建 x86_64 pkg.tar.zst'
+        description: '构建 x86_64 pkg.tar.zst（Arch 风格）'
         type: boolean
         default: false
       arm64_deb:
@@ -28,11 +28,11 @@ on:
         type: boolean
         default: false
       arm64_tarxz:
-        description: '构建 arm64 tar.xz 包'
+        description: '构建 arm64 tar.xz 通用包'
         type: boolean
         default: false
       arm64_pkg:
-        description: '构建 arm64 pkg.tar.zst'
+        description: '构建 arm64 pkg.tar.zst（Arch 风格）'
         type: boolean
         default: false
       config_choice:
@@ -62,31 +62,31 @@ on:
           - 'ubuntu'
           - 'void'
       config_custom:
-        description: '自定义配置路径或 URL（有值则覆盖上面）'
+        description: '自定义配置：本地路径或 http(s) URL'
         type: string
         default: ''
       respect_config:
-        description: '严格模式：原样用 .config，跳过调优与 olddefconfig'
+        description: '严格模式：原样使用 .config，跳过修补与 olddefconfig'
         type: boolean
         default: true
       include_headers:
-        description: '构建 headers 包'
+        description: '同时构建 headers 包（外挂模块编译必需）'
         type: boolean
         default: true
       headers_full_tree:
-        description: 'headers 完整源码树'
+        description: 'headers 拷贝完整源码树（false=仅最小子集）'
         type: boolean
         default: true
       strip_modules:
-        description: '剥离模块调试符号'
+        description: '剥离模块调试符号（体积更小，不可调试模块）'
         type: boolean
         default: false
       tarxz_include_headers:
-        description: 'tar.xz 内包含 headers'
+        description: 'tar.xz 内包含 headers 目录'
         type: boolean
         default: true
       parallel_jobs:
-        description: '并行编译数'
+        description: '并行编译任务数'
         type: choice
         default: 'auto'
         options:
@@ -97,11 +97,11 @@ on:
           - '8'
           - '16'
       ccache:
-        description: '启用 ccache'
+        description: '启用 ccache 编译器缓存'
         type: boolean
         default: false
       lto_mode:
-        description: 'LLVM LTO'
+        description: 'LLVM 链接时优化'
         type: choice
         default: 'none'
         options:
@@ -109,7 +109,7 @@ on:
           - 'full'
           - 'thin'
       tune_profile:
-        description: '调优预设'
+        description: '调优预设（none=原版，与独立开关互斥时以预设为准）'
         type: choice
         default: 'none'
         options:
@@ -120,15 +120,15 @@ on:
           - 'minimal'
           - 'debugoff'
       kernel_repo:
-        description: '内核源码仓库'
+        description: '内核源码 git 仓库'
         type: string
         default: 'https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux-stable.git'
       kernel_ref:
-        description: 'git 分支或标签（留空=自动最新 stable）'
+        description: 'git 分支或标签（留空=自动检测最新稳定版）'
         type: string
         default: ''
       release_tag:
-        description: 'Release 标签（留空只上传制品）'
+        description: 'Release 标签（留空=只上传制品不发布）'
         type: string
         default: ''
 
@@ -144,28 +144,30 @@ jobs:
       - name: 生成构建矩阵
         id: gen
         run: |
-          set -eu
+          set -uo pipefail
           MATRIX='{"include":[]}'
-          X86_FORMATS="[]"
-          if [ "${{ inputs.x86_64_deb }}" = "true" ]; then X86_FORMATS=$(echo "$X86_FORMATS" | jq -c '. + ["deb"]'); fi
-          if [ "${{ inputs.x86_64_rpm }}" = "true" ]; then X86_FORMATS=$(echo "$X86_FORMATS" | jq -c '. + ["rpm"]'); fi
-          if [ "${{ inputs.x86_64_tarxz }}" = "true" ]; then X86_FORMATS=$(echo "$X86_FORMATS" | jq -c '. + ["tarxz"]'); fi
-          if [ "${{ inputs.x86_64_pkg }}" = "true" ]; then X86_FORMATS=$(echo "$X86_FORMATS" | jq -c '. + ["pkg"]'); fi
-          if [ "$(echo "$X86_FORMATS" | jq 'length')" -gt 0 ]; then
-            MATRIX=$(echo "$MATRIX" | jq -c --argjson f "$X86_FORMATS" '.include += [{"arch":"x86_64","formats":$f}]')
+
+          X86="[]"
+          [ "${{ inputs.x86_64_deb }}" = "true" ]     && X86=$(echo "$X86" | jq -c '. + ["deb"]')
+          [ "${{ inputs.x86_64_rpm }}" = "true" ]     && X86=$(echo "$X86" | jq -c '. + ["rpm"]')
+          [ "${{ inputs.x86_64_tarxz }}" = "true" ]   && X86=$(echo "$X86" | jq -c '. + ["tarxz"]')
+          [ "${{ inputs.x86_64_pkg }}" = "true" ]     && X86=$(echo "$X86" | jq -c '. + ["pkg"]')
+          if [ "$(echo "$X86" | jq 'length')" -gt 0 ]; then
+            MATRIX=$(echo "$MATRIX" | jq -c --argjson f "$X86" '.include += [{"arch":"x86_64","formats":$f}]')
           fi
-          ARM_FORMATS="[]"
-          if [ "${{ inputs.arm64_deb }}" = "true" ]; then ARM_FORMATS=$(echo "$ARM_FORMATS" | jq -c '. + ["deb"]'); fi
-          if [ "${{ inputs.arm64_rpm }}" = "true" ]; then ARM_FORMATS=$(echo "$ARM_FORMATS" | jq -c '. + ["rpm"]'); fi
-          if [ "${{ inputs.arm64_tarxz }}" = "true" ]; then ARM_FORMATS=$(echo "$ARM_FORMATS" | jq -c '. + ["tarxz"]'); fi
-          if [ "${{ inputs.arm64_pkg }}" = "true" ]; then ARM_FORMATS=$(echo "$ARM_FORMATS" | jq -c '. + ["pkg"]'); fi
-          if [ "$(echo "$ARM_FORMATS" | jq 'length')" -gt 0 ]; then
-            MATRIX=$(echo "$MATRIX" | jq -c --argjson f "$ARM_FORMATS" '.include += [{"arch":"arm64","formats":$f}]')
+
+          ARM="[]"
+          [ "${{ inputs.arm64_deb }}" = "true" ]     && ARM=$(echo "$ARM" | jq -c '. + ["deb"]')
+          [ "${{ inputs.arm64_rpm }}" = "true" ]     && ARM=$(echo "$ARM" | jq -c '. + ["rpm"]')
+          [ "${{ inputs.arm64_tarxz }}" = "true" ]   && ARM=$(echo "$ARM" | jq -c '. + ["tarxz"]')
+          [ "${{ inputs.arm64_pkg }}" = "true" ]     && ARM=$(echo "$ARM" | jq -c '. + ["pkg"]')
+          if [ "$(echo "$ARM" | jq 'length')" -gt 0 ]; then
+            MATRIX=$(echo "$MATRIX" | jq -c --argjson f "$ARM" '.include += [{"arch":"arm64","formats":$f}]')
           fi
-          COUNT=$(echo "$MATRIX" | jq '.include | length')
+
           echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
-          if [ "$COUNT" -eq 0 ]; then
-            echo "no build target selected" >&2
+          if [ "$(echo "$MATRIX" | jq '.include | length')" -eq 0 ]; then
+            echo "未选择任何构建目标" >&2
             exit 1
           fi
 
@@ -177,27 +179,27 @@ jobs:
       - name: 解析内核版本引用
         id: resolve
         run: |
-          set -eu
+          set -uo pipefail
           INPUT_REF="${{ inputs.kernel_ref }}"
           REPO="${{ inputs.kernel_repo }}"
+
           if [ -n "$INPUT_REF" ]; then
             echo "kernel_ref=$INPUT_REF" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           if echo "$REPO" | grep -Eq '(^|/)linux-stable(\.git)?$'; then
-            STABLE_TAG=$(git ls-remote --tags --refs "$REPO" 2>/dev/null \
-              | awk -F/ '{print $NF}' \
-              | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
-              | sort -Vr \
-              | head -1 || true)
-            if [ -n "$STABLE_TAG" ]; then
-              echo "kernel_ref=$STABLE_TAG" >> "$GITHUB_OUTPUT"
+            TAG=$(git ls-remote --tags --refs "$REPO" 2>/dev/null \
+              | awk -F/ '{print $NF}' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -Vr | head -1)
+            if [ -n "$TAG" ]; then
+              echo "kernel_ref=$TAG" >> "$GITHUB_OUTPUT"
               exit 0
             fi
+            echo "无法定位 stable 最新标签" >&2
+            exit 1
           fi
-          PATTERN='^v?[0-9]+\.[0-9]+(\.[0-9]+)?(-[0-9A-Za-z._-]+)?$'
+          PAT='^v?[0-9]+\.[0-9]+(\.[0-9]+)?(-[0-9A-Za-z._-]+)?$'
           LATEST=$(git ls-remote --tags --refs --sort=-v:refname "$REPO" 2>/dev/null \
-            | awk -F/ '{print $NF}' | grep -E "$PATTERN" | head -1 || true)
+            | awk -F/ '{print $NF}' | grep -E "$PAT" | head -1)
           if [ -z "$LATEST" ]; then
             LATEST=$(git ls-remote --symref "$REPO" HEAD 2>/dev/null \
               | awk '/^ref:/ {sub("refs/heads/","",$2); print $2; exit}')
@@ -206,7 +208,7 @@ jobs:
             LATEST=$(git ls-remote "$REPO" HEAD 2>/dev/null | awk '{print $1; exit}')
           fi
           if [ -z "$LATEST" ]; then
-            echo "cannot resolve ref" >&2
+            echo "无法解析版本引用: $REPO" >&2
             exit 1
           fi
           echo "kernel_ref=$LATEST" >> "$GITHUB_OUTPUT"
@@ -248,13 +250,14 @@ jobs:
           path: dist
           pattern: kernel-*
           merge-multiple: true
-      - run: |
-          ls -lh dist/
-          test -n "$(find dist -maxdepth 1 -type f -print -quit)"
+      - name: 校验
+        run: |
+          ls -lhR dist/ | head -50
+          [ -n "$(find dist -maxdepth 1 -type f -print -quit)" ]
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ inputs.release_tag }}
           name: ${{ inputs.release_tag }}
-          files: dist/*
+          files: dist/**
           generate_release_notes: true
           overwrite_files: true
