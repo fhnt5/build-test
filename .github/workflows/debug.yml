@@ -3,33 +3,12 @@ name: Debug Build Kernel
 on:
   workflow_dispatch:
     inputs:
-      # ─────────── x86_64 ───────────
-      x86_64_deb:
-        description: 'x86_64  ›  deb'
-        type: boolean
-        default: true
-      x86_64_rpm:
-        description: 'x86_64  ›  rpm'
-        type: boolean
-        default: false
-      x86_64_pkg:
-        description: 'x86_64  ›  pkg.tar.zst'
-        type: boolean
-        default: false
-      # ─────────── arm64 ───────────
-      arm64_deb:
-        description: 'arm64   ›  deb'
-        type: boolean
-        default: false
-      arm64_rpm:
-        description: 'arm64   ›  rpm'
-        type: boolean
-        default: false
-      arm64_pkg:
-        description: 'arm64   ›  pkg.tar.zst（使用 Arch Linux ARM 容器）'
-        type: boolean
-        default: false
-      # ─────────── 内核配置（下拉）───────────
+      x86_64_deb:  { description: 'x86_64  ›  deb', type: boolean, default: true }
+      x86_64_rpm:  { description: 'x86_64  ›  rpm', type: boolean, default: false }
+      x86_64_pkg:  { description: 'x86_64  ›  pkg.tar.zst', type: boolean, default: false }
+      arm64_deb:   { description: 'arm64   ›  deb', type: boolean, default: false }
+      arm64_rpm:   { description: 'arm64   ›  rpm', type: boolean, default: false }
+      arm64_pkg:   { description: 'arm64   ›  pkg.tar.zst（使用 Arch Linux ARM 容器）', type: boolean, default: false }
       config_choice:
         description: '内核配置来源：default = 内核 defconfig；configs/* = 仓库文件；其他 = 发行版'
         type: choice
@@ -58,7 +37,6 @@ on:
         type: string
         required: false
         default: ''
-      # ─────────── 通用 ───────────
       kernel_repo:
         description: '内核源码仓库 URL'
         required: true
@@ -71,9 +49,8 @@ on:
         description: '（可选）完成后发布到该 tag 的 Release，留空则不发布'
         required: false
         default: ''
-      # ─────────── 调试开关 ───────────
       debug_verbose:
-        description: '开启 shell 逐行跟踪（set -x），日志会非常长，全格式生效'
+        description: '开启 shell 逐行跟踪（set -x），日志会非常长'
         type: boolean
         default: false
 
@@ -81,7 +58,6 @@ permissions:
   contents: write
 
 jobs:
-  # ------------------------------------------------------------------
   prepare:
     runs-on: ubuntu-latest
     outputs:
@@ -95,21 +71,17 @@ jobs:
             MATRIX=$(echo "$MATRIX" | jq -c --arg a "$1" --arg f "$2" \
               '.include += [{arch:$a, format:$f}]')
           }
-          if [ "${{ inputs.x86_64_deb }}" = "true" ]; then add x86_64 deb;        fi
-          if [ "${{ inputs.x86_64_rpm }}" = "true" ]; then add x86_64 rpm;        fi
-          if [ "${{ inputs.x86_64_pkg }}" = "true" ]; then add x86_64 pkg.tar.zst; fi
-          if [ "${{ inputs.arm64_deb }}"  = "true" ]; then add arm64  deb;        fi
-          if [ "${{ inputs.arm64_rpm }}"  = "true" ]; then add arm64  rpm;        fi
-          if [ "${{ inputs.arm64_pkg }}"  = "true" ]; then add arm64  pkg.tar.zst; fi
+          [ "${{ inputs.x86_64_deb }}" = "true" ] && add x86_64 deb
+          [ "${{ inputs.x86_64_rpm }}" = "true" ] && add x86_64 rpm
+          [ "${{ inputs.x86_64_pkg }}" = "true" ] && add x86_64 pkg.tar.zst
+          [ "${{ inputs.arm64_deb }}"  = "true" ] && add arm64  deb
+          [ "${{ inputs.arm64_rpm }}"  = "true" ] && add arm64  rpm
+          [ "${{ inputs.arm64_pkg }}"  = "true" ] && add arm64  pkg.tar.zst
           COUNT=$(echo "$MATRIX" | jq '.include | length')
           echo "MATRIX = $MATRIX"
-          if [ "$COUNT" -eq 0 ]; then
-            echo "No build target selected." >&2
-            exit 1
-          fi
+          [ "$COUNT" -eq 0 ] && { echo "No build target selected." >&2; exit 1; }
           echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
 
-  # ------------------------------------------------------------------
   resolve-ref:
     runs-on: ubuntu-latest
     outputs:
@@ -125,17 +97,11 @@ jobs:
             LATEST=$(git ls-remote --tags --refs --sort=-v:refname \
               https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux-stable.git \
               | awk -F/ '{print $NF}' \
-              | grep -E '^v[0-9]+\.[0-9]+(\.[0-9]+)?$' \
-              | head -1)
-            if [ -z "$LATEST" ]; then
-              echo "ERROR: failed to detect latest stable tag" >&2
-              exit 1
-            fi
-            echo "Detected: $LATEST"
+              | grep -E '^v[0-9]+\.[0-9]+(\.[0-9]+)?$' | head -1)
+            [ -z "$LATEST" ] && { echo "ERROR: failed to detect" >&2; exit 1; }
             echo "kernel_ref=$LATEST" >> "$GITHUB_OUTPUT"
           fi
 
-  # ------------------------------------------------------------------
   build:
     needs: [prepare, resolve-ref]
     runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
@@ -145,41 +111,46 @@ jobs:
       matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
 
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
+    - uses: actions/checkout@v4
 
-    # ==================================================================
-    # 生成共享日志分析脚本 —— 所有格式共用
-    # ==================================================================
+    # ══════════════════════════════════════════════════════════════════
+    # debug-only：共享日志分析脚本
+    # ══════════════════════════════════════════════════════════════════
     - name: Create shared log analyzer
       run: |
         cat > /tmp/analyze-log.sh <<'ANALYZE_EOF'
         #!/bin/bash
         # usage: analyze-log.sh <logfile> <format> <arch>
-        LOG_FILE="$1"
-        FMT="$2"
-        ARCH="$3"
+        LOG_FILE="$1"; FMT="$2"; ARCH="$3"
+        [ -f "$LOG_FILE" ] || { echo "WARN: analyze-log.sh: no log at $LOG_FILE"; exit 0; }
 
-        if [ ! -f "$LOG_FILE" ]; then
-          echo "WARN: analyze-log.sh: no log at $LOG_FILE"
-          exit 0
-        fi
+        # ── 精确匹配：只在明确是错误时命中 ──
+        ERR_PATTERN='(^|[[:space:]])error:|^[^:]*make(\[[0-9]+\])?: \*\*\*|(^|[[:space:]])Error [0-9]+|undefined reference to|multiple definition of|(^|[[:space:]])FAILED:|(^|[[:space:]])ERROR:|(^|[[:space:]])FATAL|ld: cannot find|cannot find -l|(^|[[:space:]])No such file or directory'
 
-        # 大小写混合的错误/警告模式
-        ERR_PATTERN='([Ee][Rr][Rr][Oo][Rr]|[Ff][Aa][Tt][Aa][Ll]|[Ff][Aa][Ii][Ll][Ee][Dd]|undefined reference|multiple definition|No such file|not found|cannot find)'
-        WARN_PATTERN='([Ww][Aa][Rr][Nn][Ii][Nn][Gg]|deprecated|uninitialized|may be used|ignored without)'
+        # ── 反向过滤：明确不是错误的 ──
+        ERR_FILTER='WERROR|CONFIG_.*ERROR|ERROR_|-error|perl-error|/tmpfiles\.d/|error_injection|verbose_error|_ERROR_'
 
-        ERR_LINES=$(grep -nE "$ERR_PATTERN" "$LOG_FILE" 2>/dev/null | head -500 || true)
-        WARN_LINES=$(grep -nE "$WARN_PATTERN" "$LOG_FILE" 2>/dev/null | head -500 || true)
+        # ── 警告匹配 + 过滤 ──
+        WARN_PATTERN='(^|[[:space:]])(warning|Warning|WARNING):|(^|[[:space:]])WARNING:|deprecated|may be used uninitialized'
+        WARN_FILTER='is up to date -- skipping|Skipping dependency|is up to date -- skipping|up to date -- skipping'
+
+        RAW_ERR=$(grep -nE "$ERR_PATTERN" "$LOG_FILE" 2>/dev/null || true)
+        RAW_WARN=$(grep -nE "$WARN_PATTERN" "$LOG_FILE" 2>/dev/null || true)
+
+        ERR_LINES=$(printf '%s\n' "$RAW_ERR" | grep -vE "$ERR_FILTER" | head -500 || true)
+        WARN_LINES=$(printf '%s\n' "$RAW_WARN" | grep -vE "$WARN_FILTER" | head -500 || true)
+
         ERR_CNT=$(printf '%s\n' "$ERR_LINES" | grep -c . || true)
         WARN_CNT=$(printf '%s\n' "$WARN_LINES" | grep -c . || true)
+        RAW_ERR_CNT=$(printf '%s\n' "$RAW_ERR" | grep -c . || true)
+        RAW_WARN_CNT=$(printf '%s\n' "$RAW_WARN" | grep -c . || true)
 
         echo ""
         echo "╔════════════════════════════════════════════════════════════════╗"
         echo "║  LOG ANALYSIS — ${FMT} / ${ARCH}"
         echo "║  log file: ${LOG_FILE}"
-        echo "║  errors:   ${ERR_CNT}"
-        echo "║  warnings: ${WARN_CNT}"
+        echo "║  errors:   ${ERR_CNT}   (raw=${RAW_ERR_CNT}, filtered out=$((RAW_ERR_CNT - ERR_CNT)))"
+        echo "║  warnings: ${WARN_CNT}   (raw=${RAW_WARN_CNT}, filtered out=$((RAW_WARN_CNT - WARN_CNT)))"
         echo "╚════════════════════════════════════════════════════════════════╝"
         echo ""
         echo "──────── ERRORS (with line numbers) ────────"
@@ -193,12 +164,12 @@ jobs:
         {
           echo "## Build Log Analysis — ${FMT} / \`${ARCH}\`"
           echo ""
-          echo "Log file: \`${LOG_FILE}\`"
+          echo "Log: \`${LOG_FILE}\`"
           echo ""
-          echo "| Category | Count |"
-          echo "|---|---|"
-          echo "| Errors   | ${ERR_CNT} |"
-          echo "| Warnings | ${WARN_CNT} |"
+          echo "| Category | Count | Raw matches | Filtered out |"
+          echo "|---|---|---|---|"
+          echo "| Errors   | ${ERR_CNT} | ${RAW_ERR_CNT} | $((RAW_ERR_CNT - ERR_CNT)) |"
+          echo "| Warnings | ${WARN_CNT} | ${RAW_WARN_CNT} | $((RAW_WARN_CNT - WARN_CNT)) |"
           echo ""
           echo "### Errors (with line numbers)"
           echo '```'
@@ -232,18 +203,21 @@ jobs:
         echo "Format: ${{ matrix.format }}"
         echo "Ref:    ${{ needs.resolve-ref.outputs.kernel_ref }}"
         echo "Runner: ${{ runner.os }} / ${{ runner.arch }}"
+        echo "Debug:  ${{ inputs.debug_verbose }}"
 
     - name: Set arch variables
       id: arch
       run: |
         case "${{ matrix.arch }}" in
           x86_64|amd64)
-            echo "karch=x86_64"    >> "$GITHUB_OUTPUT"
-            echo "deb_arch=amd64"  >> "$GITHUB_OUTPUT"
+            echo "karch=x86_64"   >> "$GITHUB_OUTPUT"
+            echo "deb_arch=amd64" >> "$GITHUB_OUTPUT"
+            echo "carch=x86_64"   >> "$GITHUB_OUTPUT"
             ;;
           arm64|aarch64)
-            echo "karch=arm64"     >> "$GITHUB_OUTPUT"
-            echo "deb_arch=arm64"  >> "$GITHUB_OUTPUT"
+            echo "karch=arm64"    >> "$GITHUB_OUTPUT"
+            echo "deb_arch=arm64" >> "$GITHUB_OUTPUT"
+            echo "carch=aarch64"  >> "$GITHUB_OUTPUT"
             ;;
           *)
             echo "Unsupported arch" >&2
@@ -280,10 +254,7 @@ jobs:
         CUSTOM="${{ inputs.config_custom }}"
         KARCH="${{ steps.arch.outputs.karch }}"
         CONFIG_OUT="/tmp/kernel.config"
-
-        if [ -n "$CUSTOM" ]; then
-          CHOICE="$CUSTOM"
-        fi
+        [ -n "$CUSTOM" ] && CHOICE="$CUSTOM"
 
         if [ -z "$CHOICE" ] || [ "$CHOICE" = "default" ]; then
           cd kernel-source
@@ -315,30 +286,28 @@ jobs:
             void)     URL='https://raw.githubusercontent.com/void-linux/void-packages/master/srcpkgs/linux/files/x86_64-dotconfig' ;;
             *) echo "Unknown config_choice: $CHOICE" >&2; exit 1 ;;
           esac
-          curl -fSL "$URL" -o "$CONFIG_OUT" || { echo "ERROR: failed to download $URL" >&2; exit 1; }
+          curl -fSL "$URL" -o "$CONFIG_OUT" || { echo "ERROR: download $URL failed" >&2; exit 1; }
         fi
 
         [ -s "$CONFIG_OUT" ] || { echo "ERROR: empty config" >&2; exit 1; }
         echo "config lines: $(wc -l < "$CONFIG_OUT")"
-
         cd kernel-source
         cp "$CONFIG_OUT" .config
         make ARCH="$KARCH" olddefconfig
 
-    # ==================================================================
-    # deb / rpm —— 带完整 debug 支持
-    # ==================================================================
+    # ══════════════════════════════════════════════════════════════════
+    # deb / rpm（构建命令与 build.yml 完全一致，外面加 tee + 分析）
+    # ══════════════════════════════════════════════════════════════════
     - name: Build kernel packages (deb / rpm)
       if: matrix.format != 'pkg.tar.zst'
       env:
         DEBUG_VERBOSE: ${{ inputs.debug_verbose }}
       run: |
         set -uo pipefail
-        if [ "${DEBUG_VERBOSE}" = "true" ]; then set -x; fi
+        [ "${DEBUG_VERBOSE}" = "true" ] && set -x
 
         LOG="/tmp/build-${{ matrix.format }}-${{ matrix.arch }}.log"
         mkdir -p dist-debug
-
         cd kernel-source
 
         case "${{ matrix.format }}" in
@@ -365,28 +334,23 @@ jobs:
         esac
 
         echo "make exit code: $RC"
-
-        # 把日志留在工作目录，供后续 artifact 上传
-        cp "$LOG" "dist-debug/" 2>/dev/null || true
-
-        # 无论成功失败，主动分析
+        cp "$LOG" dist-debug/ 2>/dev/null || true
         bash /tmp/analyze-log.sh "$LOG" "${{ matrix.format }}" "${{ matrix.arch }}"
 
         if [ "$RC" -ne 0 ]; then
-          echo ""
           echo "完整日志请下载 artifact: debug-log-${{ matrix.format }}-${{ matrix.arch }}"
         fi
         exit "$RC"
 
-    # ==================================================================
-    # pkg.tar.zst —— 容器内构建 + 完整 debug + 共享日志分析
-    # ==================================================================
+    # ══════════════════════════════════════════════════════════════════
+    # pkg.tar.zst（构建命令与 build.yml 完全一致，外面加 tee + 分析）
+    # ══════════════════════════════════════════════════════════════════
     - name: Build kernel packages (pkg.tar.zst)
       if: matrix.format == 'pkg.tar.zst'
       env:
         DEBUG_VERBOSE: ${{ inputs.debug_verbose }}
       run: |
-        set -o pipefail
+        set -euo pipefail
 
         case "${{ matrix.arch }}" in
           x86_64) ARCH_IMAGE="archlinux:latest" ;;
@@ -401,11 +365,12 @@ jobs:
 
         # ─────────────────────────────────────────────────────────────
         # root-part.sh（容器内 root 身份执行）
+        # 注意：所有 heredoc 内容缩进 8 格，让 YAML 正确剥离
         # ─────────────────────────────────────────────────────────────
         cat > "$STAGE/root-part.sh" <<'ROOT_EOF'
         #!/bin/bash
         set -e
-        if [ "${DEBUG_VERBOSE:-false}" = "true" ]; then set -x; fi
+        [ "${DEBUG_VERBOSE:-false}" = "true" ] && set -x
 
         sed -i "s/^#DisableSandbox/DisableSandbox/" /etc/pacman.conf
 
@@ -431,47 +396,56 @@ jobs:
 
         # ─────────────────────────────────────────────────────────────
         # builder-part.sh（容器内 builder 身份执行）
+        # 与 build.yml 的 pkg 分支保持一致，只多了 dump / 诊断
         # ─────────────────────────────────────────────────────────────
         cat > "$STAGE/builder-part.sh" <<'BUILDER_EOF'
         #!/bin/bash
         set -uo pipefail
-        if [ "${DEBUG_VERBOSE:-false}" = "true" ]; then set -x; fi
+        [ "${DEBUG_VERBOSE:-false}" = "true" ] && set -x
         cd "$HOME"
+
+        CARCH="${CARCH:-$(uname -m)}"
+        echo "Container CARCH=$CARCH"
 
         BTF_ENABLE="CONFIG_DEBUG_KERNEL CONFIG_DEBUG_INFO CONFIG_DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT CONFIG_DEBUG_INFO_BTF CONFIG_DEBUG_INFO_BTF_MODULES"
         BTF_DISABLE="CONFIG_DEBUG_INFO_NONE CONFIG_DEBUG_INFO_SPLIT CONFIG_DEBUG_INFO_REDUCED CONFIG_GCC_PLUGIN_RANDSTRUCT"
+        WERROR_DISABLE="CONFIG_WERROR CONFIG_LD_ORPHAN_WARN"
 
-        fix_btf() {
+        fix_kconfig() {
           local f="$1"
           for opt in $BTF_ENABLE; do
             sed -i "/^# ${opt} is not set/d" "$f"
             sed -i "/^${opt}=/d" "$f"
             echo "${opt}=y" >> "$f"
           done
-          for opt in $BTF_DISABLE; do
+          for opt in $BTF_DISABLE $WERROR_DISABLE; do
             sed -i "/^${opt}=/d" "$f"
             sed -i "/^# ${opt} is not set/d" "$f"
             echo "# ${opt} is not set" >> "$f"
           done
+          sed -i "/^CONFIG_LD_ORPHAN_WARN_LEVEL=/d" "$f"
+          echo 'CONFIG_LD_ORPHAN_WARN_LEVEL="warn"' >> "$f"
         }
 
-        dump_btf() {
-          echo "──── $1: BTF/DEBUG lines ────"
-          grep -nE 'DEBUG_INFO|BTF|RANDSTRUCT|DEBUG_KERNEL' "$1" || echo "(no matches)"
+        dump_kconfig() {
+          echo "──── ${1} (BTF/WERROR lines with numbers) ────"
+          grep -nE 'DEBUG_INFO|BTF|RANDSTRUCT|WERROR|ORPHAN_WARN|DEBUG_KERNEL' "$1" || echo "(no matches)"
           echo "──── end ────"
         }
 
-        check_btf() {
+        check_kconfig() {
           local f="$1" fail=0
           for opt in CONFIG_DEBUG_KERNEL CONFIG_DEBUG_INFO CONFIG_DEBUG_INFO_BTF; do
             grep -q "^${opt}=y" "$f" || { echo "MISSING: ${opt}=y" >&2; fail=1; }
           done
-          for opt in $BTF_DISABLE; do
+          for opt in $BTF_DISABLE $WERROR_DISABLE; do
             grep -q "^${opt}=y" "$f" && { echo "BAD: ${opt}=y" >&2; fail=1; }
           done
+          grep -q '^CONFIG_LD_ORPHAN_WARN_LEVEL="error"' "$f" && { echo "BAD: LD_ORPHAN_WARN_LEVEL=error" >&2; fail=1; }
           return $fail
         }
 
+        # ── 1. 克隆 Arch PKGBUILD ──
         git clone --depth 1 \
           https://gitlab.archlinux.org/archlinux/packaging/packages/linux.git \
           arch-pkg
@@ -479,56 +453,82 @@ jobs:
 
         sed -i "s/^pkgbase=.*/pkgbase=linux-custom/" PKGBUILD
 
-        if grep -qE "cp[[:space:]]+\.\./config\.[^[:space:]]+[[:space:]]+\.config" PKGBUILD; then
-          sed -i -E "s|cp[[:space:]]+\.\./config\.[^[:space:]]+[[:space:]]+\.config|cp /tmp/kernel.config .config|" PKGBUILD
-        fi
+        # ── 2. 预创建所有可能的 config 文件名，防止 PKGBUILD 引用不到 ──
+        mkdir -p src
+        for name in config config.x86_64 config.aarch64 config.arm64 "config.${CARCH}"; do
+          cp ~/kernel.config "src/$name"
+        done
         cp ~/kernel.config config
 
+        # ── 3. 更宽松的 PKGBUILD config 引用替换 ──
+        sed -i -E "s|cp[[:space:]]+(\"?\\\$\{srcdir\}/)?\.?\.?/?config\.[^[:space:]\"]+[[:space:]]+\.config|cp /tmp/kernel.config .config|g" PKGBUILD
+        sed -i -E "s|cp[[:space:]]+\"?\\\$\{srcdir\}/config\"?[[:space:]]+\.config|cp /tmp/kernel.config .config|g" PKGBUILD
+
+        echo "──── PKGBUILD config references (after patch) ────"
+        grep -nE '(^|[^a-zA-Z_])config([^a-zA-Z_]|$|\.)' PKGBUILD | head -30 || true
+        echo "──── end ────"
+
+        # ── 4. 阶段 A：只解压 + prepare ──
         echo ""
         echo "════════════ makepkg -o (prepare only) ════════════"
         makepkg -o --noconfirm --nodeps --ignorearch --skipinteg
+        PREPARE_RC=$?
+        echo "makepkg -o exit code: $PREPARE_RC"
+        [ "$PREPARE_RC" -eq 0 ] || { echo "FATAL: prepare failed" >&2; exit $PREPARE_RC; }
 
         SRC_DIR=$(find "$HOME/arch-pkg/src" -maxdepth 1 -type d -name 'linux-*' | head -1)
         echo "SRC_DIR=$SRC_DIR"
         [ -n "$SRC_DIR" ] || { echo "FATAL: no source dir" >&2; exit 1; }
-        [ -f "$SRC_DIR/.config" ] || cp ~/kernel.config "$SRC_DIR/.config"
+
+        # ── 5. 强制覆盖 .config 为我们的配置 ──
+        cp ~/kernel.config "$SRC_DIR/.config"
+
+        # ── 6. 诊断 prepare() 之后的 .config ──
+        echo ""
+        echo "════════════ .config AFTER prepare() (before fix) ════════════"
+        dump_kconfig "$SRC_DIR/.config"
+
+        # ── 7. 修复 BTF 依赖链 + 关闭 WERROR ──
+        fix_kconfig "$SRC_DIR/.config"
 
         echo ""
-        echo "════════════ .config AFTER prepare() ════════════"
-        dump_btf "$SRC_DIR/.config"
+        echo "════════════ .config AFTER fix ════════════"
+        dump_kconfig "$SRC_DIR/.config"
 
+        # ── 8. 修复后二次校验 ──
         echo ""
-        echo "════════════ Applying BTF fix ════════════"
-        fix_btf "$SRC_DIR/.config"
-        dump_btf "$SRC_DIR/.config"
-
-        echo ""
-        echo "════════════ Verifying BTF config ════════════"
-        if ! check_btf "$SRC_DIR/.config"; then
-          echo "FATAL: BTF check failed" >&2
-          grep -nE 'DEBUG_INFO|BTF|RANDSTRUCT|DEBUG_KERNEL' "$SRC_DIR/.config" >&2
+        echo "════════════ Verifying kconfig ════════════"
+        if ! check_kconfig "$SRC_DIR/.config"; then
+          echo "FATAL: kconfig check failed" >&2
+          grep -nE 'DEBUG_INFO|BTF|RANDSTRUCT|WERROR|ORPHAN' "$SRC_DIR/.config" >&2
           exit 1
         fi
-        echo "BTF config OK."
+        echo "kconfig OK."
 
+        # ── 9. pahole 兼容补丁 ──
         PAHOLE_FLAGS="$SRC_DIR/scripts/pahole-flags.sh"
         if [ -f "$PAHOLE_FLAGS" ] && ! grep -q 'skip_encoding_btf_enum64' "$PAHOLE_FLAGS"; then
           printf '\nif [ "${pahole_ver}" -ge "124" ]; then\n  extra_paholeopt="${extra_paholeopt} --skip_encoding_btf_enum64"\nfi\n' >> "$PAHOLE_FLAGS"
           echo "Injected --skip_encoding_btf_enum64"
+        else
+          echo "pahole-flags.sh: patch not needed or file not found"
         fi
 
+        # ── 10. 阶段 B：使用已准备源码构建 ──
         echo ""
         echo "════════════ makepkg -e (build only) ════════════"
         LOG="$HOME/arch-pkg/makepkg-build.log"
         makepkg -e --noconfirm --nodeps --ignorearch --skipinteg --keep 2>&1 | tee "$LOG"
         rc=${PIPESTATUS[0]}
+        echo "makepkg -e exit code: $rc"
 
+        # ── 11. 容器内诊断 ──
         echo ""
-        echo "════════════════ CONTAINER-SIDE DIAGNOSTICS ════════════════"
-        echo "[1] .config BTF lines:"
-        grep -nE 'DEBUG_INFO|BTF|RANDSTRUCT|DEBUG_KERNEL' "$SRC_DIR/.config" || echo "(none)"
+        echo "════════════ CONTAINER-SIDE DIAGNOSTICS ════════════"
+        echo "[1] .config BTF/WERROR lines:"
+        grep -nE 'DEBUG_INFO|BTF|RANDSTRUCT|WERROR|ORPHAN' "$SRC_DIR/.config" || echo "(none)"
         echo ""
-        echo "[2] vmlinux .BTF section:"
+        echo "[2] vmlinux .BTF section check:"
         if [ -f "$SRC_DIR/vmlinux" ]; then
           ls -lh "$SRC_DIR/vmlinux"
           readelf -S "$SRC_DIR/vmlinux" 2>/dev/null | grep -i BTF || echo "(NO .BTF SECTION)"
@@ -541,15 +541,13 @@ jobs:
         echo ""
         echo "[4] PKGBUILD prepare() function:"
         awk '/^prepare\(\)/,/^}/' "$HOME/arch-pkg/PKGBUILD" || true
-        echo "════════════════════════════════════════════════════════════"
+        echo "════════════════════════════════════════════════════"
 
         exit "${rc:-1}"
         BUILDER_EOF
         chmod +x "$STAGE/builder-part.sh"
 
-        # ─────────────────────────────────────────────────────────────
-        # 启动容器并执行（宿主机侧 tee 全部输出）
-        # ─────────────────────────────────────────────────────────────
+        # ── 启动容器 ──
         CID=$(docker run -d \
           -e DEBUG_VERBOSE="${DEBUG_VERBOSE}" \
           -v "$STAGE:/host-staging:ro" \
@@ -570,7 +568,7 @@ jobs:
         set -e
         echo "Container exit code: $RC"
 
-        # ── 拷回产物和日志 ──
+        # ── 拷贝产物和日志（成败都拷） ──
         docker cp "$CID:/home/builder/arch-pkg/makepkg-build.log" \
           "$STAGE/out/makepkg-build.log" 2>/dev/null || true
         docker cp "$CID:/home/builder/arch-pkg/." "$STAGE/out/" 2>/dev/null || true
@@ -579,26 +577,22 @@ jobs:
 
         mkdir -p dist dist-debug
         find "$STAGE/out" -maxdepth 1 -type f -name '*.pkg.tar.zst' -exec mv {} dist/ \;
-        # 保存宿主机侧完整日志（含容器所有输出）
         cp "$LOG" dist-debug/ 2>/dev/null || true
-        # 保存容器内 makepkg 日志（补充）
         [ -f "$STAGE/out/makepkg-build.log" ] && \
           cp "$STAGE/out/makepkg-build.log" dist-debug/ 2>/dev/null || true
 
         # ── 共享分析器：无论成败都执行 ──
         bash /tmp/analyze-log.sh "$LOG" "${{ matrix.format }}" "${{ matrix.arch }}"
+        rm -rf "$STAGE"
 
         if [ "$RC" -ne 0 ]; then
           echo ""
           echo "──── partial artifacts in dist/ ────"
           ls -lh dist/ || true
-          echo ""
           echo "完整日志请下载 artifact: debug-log-${{ matrix.format }}-${{ matrix.arch }}"
-          rm -rf "$STAGE"
           exit "$RC"
         fi
 
-        rm -rf "$STAGE"
         echo ""
         echo "──── pkg artifacts ────"
         ls -lh dist/
@@ -634,7 +628,6 @@ jobs:
         if-no-files-found: warn
         retention-days: 7
 
-    # 所有格式都上传 debug 日志
     - name: Upload debug logs (all formats)
       if: always() && !cancelled() && hashFiles('dist-debug/**') != ''
       uses: actions/upload-artifact@v4
@@ -644,7 +637,6 @@ jobs:
         if-no-files-found: warn
         retention-days: 7
 
-  # ------------------------------------------------------------------
   publish:
     needs: build
     if: inputs.release_tag != ''
