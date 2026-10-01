@@ -258,6 +258,6 @@ jobs:
         with:
           tag_name: ${{ inputs.release_tag }}
           name: ${{ inputs.release_tag }}
-          files: dist/**
+          files: dist/**          # ← 建议改成 dist/**
           generate_release_notes: true
           overwrite_files: true
