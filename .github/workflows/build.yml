@@ -10,13 +10,20 @@ on:
       arm64_rpm:   { description: 'arm64   ›  rpm', type: boolean, default: false }
       arm64_pkg:   { description: 'arm64   ›  pkg.tar.zst（使用 Arch Linux ARM 容器）', type: boolean, default: false }
       config_choice:
-        description: '内核配置来源：default = 内核 defconfig；configs/* = 仓库文件；其他 = 发行版'
+        description: '内核配置来源：default = 内核 defconfig；all*config/tinyconfig = 内核自带构建目标；configs/* = 仓库文件；其他 = 发行版'
         type: choice
         required: true
         default: 'default'
         options:
-          - 'default'
+          # ── 内核自带构建目标 ──
+          - 'default'                    # make defconfig（架构默认）
+          - 'allyesconfig'               # make allyesconfig（全部编进内核，可能失败，包很大）
+          - 'allmodconfig'               # make allmodconfig（尽量模块化，可能失败，包很大）
+          - 'allnoconfig'                # make allnoconfig（最小配置）
+          - 'tinyconfig'                 # make tinyconfig（极小内核）
+          # ── 仓库内的 config ──
           - 'configs/G40_45.config'
+          # ── 发行版 config ──
           - 'alma'
           - 'alpine'
           - 'arch'
@@ -168,16 +175,36 @@ jobs:
         [ -n "$CUSTOM" ] && CHOICE="$CUSTOM"
 
         if [ -z "$CHOICE" ] || [ "$CHOICE" = "default" ]; then
+          echo "==> Source: kernel defconfig (make defconfig)"
           cd kernel-source
           make ARCH="$KARCH" defconfig
           cp .config "$CONFIG_OUT"
           cd ..
+          echo "CONFIG_SOURCE=kernel defconfig" >> "$GITHUB_ENV"
+
+        elif [[ "$CHOICE" =~ ^(allyesconfig|allmodconfig|allnoconfig|tinyconfig)$ ]]; then
+          echo "==> Source: kernel built-in make target: make $CHOICE"
+          cd kernel-source
+          make ARCH="$KARCH" "$CHOICE"
+          cp .config "$CONFIG_OUT"
+          cd ..
+          echo "CONFIG_SOURCE=kernel built-in: $CHOICE" >> "$GITHUB_ENV"
+
         elif [[ "$CHOICE" == http://* ]] || [[ "$CHOICE" == https://* ]]; then
+          echo "==> Source: download from URL: $CHOICE"
           curl -fSL "$CHOICE" -o "$CONFIG_OUT"
+          echo "CONFIG_SOURCE=$CHOICE" >> "$GITHUB_ENV"
+
         elif [ -f "$CHOICE" ]; then
+          echo "==> Source: repo file: $CHOICE"
           cp "$CHOICE" "$CONFIG_OUT"
+          echo "CONFIG_SOURCE=$CHOICE" >> "$GITHUB_ENV"
+
         elif [ -f "configs/$CHOICE" ]; then
+          echo "==> Source: repo file: configs/$CHOICE"
           cp "configs/$CHOICE" "$CONFIG_OUT"
+          echo "CONFIG_SOURCE=configs/$CHOICE" >> "$GITHUB_ENV"
+
         else
           case "$CHOICE" in
             alma)     URL='https://git.almalinux.org/rpms/kernel/-/raw/c9/f/kernel-x86_64-fedora.config' ;;
@@ -197,11 +224,14 @@ jobs:
             void)     URL='https://raw.githubusercontent.com/void-linux/void-packages/master/srcpkgs/linux/files/x86_64-dotconfig' ;;
             *) echo "Unknown config_choice: $CHOICE" >&2; exit 1 ;;
           esac
+          echo "==> Source: distro '$CHOICE' -> $URL"
           curl -fSL "$URL" -o "$CONFIG_OUT" || { echo "ERROR: download $URL failed" >&2; exit 1; }
+          echo "CONFIG_SOURCE=$CHOICE ($URL)" >> "$GITHUB_ENV"
         fi
 
         [ -s "$CONFIG_OUT" ] || { echo "ERROR: empty config" >&2; exit 1; }
         echo "config lines: $(wc -l < "$CONFIG_OUT")"
+
         cd kernel-source
         cp "$CONFIG_OUT" .config
         make ARCH="$KARCH" olddefconfig
@@ -253,7 +283,7 @@ jobs:
           base-devel git libarchive jq bc rsync kmod inetutils \
           elfutils debugedit zstd pahole
 
-        # 关掉 -Werror=format-security（bpftool bootstrap 编译用）
+        # 关掉 -Werror=format-security
         sed -i 's/-Werror=format-security/-Wno-error=format-security/g' /etc/makepkg.conf
         echo "---- makepkg.conf CFLAGS after patch ----"
         grep -E '^(CFLAGS|CXXFLAGS)=' /etc/makepkg.conf || true
@@ -314,7 +344,7 @@ jobs:
 
         sed -i "s/^pkgbase=.*/pkgbase=linux-custom/" PKGBUILD
 
-        # 跳过 htmldocs（需 python-yaml + TeX Live 几 GB）
+        # 跳过 htmldocs
         sed -i 's/make htmldocs/: # htmldocs disabled/g' PKGBUILD
         echo "---- PKGBUILD htmldocs check ----"
         grep -q htmldocs PKGBUILD && { echo "WARN: htmldocs still present:"; grep -n htmldocs PKGBUILD; } || echo "OK: no htmldocs"
@@ -350,9 +380,7 @@ jobs:
           exit 1
         fi
 
-        # ── 关键：手动跑一次 syncconfig，让 auto.conf 与 .config 一致 ──
-        # 目的：避免 makepkg -e 里的 make 首次触发 syncconfig 时把 BTF 选项关掉。
-        #      若 syncconfig 后 BTF 被关，说明 7.2.8 有新依赖我们没满足，立刻报错。
+        # 手动 syncconfig，避免 makepkg -e 里首次 make 触发 syncconfig 时把 BTF 关掉
         case "$(uname -m)" in
           x86_64|amd64) KARCH_SYNC="x86_64" ;;
           aarch64|arm64) KARCH_SYNC="arm64" ;;
@@ -377,7 +405,6 @@ jobs:
         BUILD_RC=$?
         echo "makepkg -e exit code: $BUILD_RC"
 
-        # ── 诊断 ──
         echo ""
         echo "════════════ CONTAINER-SIDE DIAGNOSTICS ════════════"
         echo "[1] .config BTF/WERROR lines:"
