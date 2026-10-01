@@ -68,23 +68,24 @@ jobs:
       - name: Generate build matrix
         id: gen
         run: |
+          set -uo pipefail
           MATRIX='{"include":[]}'
 
           X86_FORMATS="[]"
-          [ "${{ inputs.x86_64_deb }}"   = "true" ] && X86_FORMATS=$(echo "$X86_FORMATS" | jq -c '. + ["deb"]')
-          [ "${{ inputs.x86_64_rpm }}"   = "true" ] && X86_FORMATS=$(echo "$X86_FORMATS" | jq -c '. + ["rpm"]')
-          [ "${{ inputs.x86_64_tarxz }}" = "true" ] && X86_FORMATS=$(echo "$X86_FORMATS" | jq -c '. + ["tarxz"]')
-          [ "${{ inputs.x86_64_pkg }}"   = "true" ] && X86_FORMATS=$(echo "$X86_FORMATS" | jq -c '. + ["pkg"]')
+          [ "${{ inputs.x86_64_deb }}"   = "true" ] && X86_FORMATS=$(echo "$X86_FORMATS" | jq -c '. + ["deb"]')   || true
+          [ "${{ inputs.x86_64_rpm }}"   = "true" ] && X86_FORMATS=$(echo "$X86_FORMATS" | jq -c '. + ["rpm"]')   || true
+          [ "${{ inputs.x86_64_tarxz }}" = "true" ] && X86_FORMATS=$(echo "$X86_FORMATS" | jq -c '. + ["tarxz"]') || true
+          [ "${{ inputs.x86_64_pkg }}"   = "true" ] && X86_FORMATS=$(echo "$X86_FORMATS" | jq -c '. + ["pkg"]')   || true
           if [ "$(echo "$X86_FORMATS" | jq 'length')" -gt 0 ]; then
             MATRIX=$(echo "$MATRIX" | jq -c --argjson f "$X86_FORMATS" \
               '.include += [{arch:"x86_64", formats:$f}]')
           fi
 
           ARM_FORMATS="[]"
-          [ "${{ inputs.arm64_deb }}"   = "true" ] && ARM_FORMATS=$(echo "$ARM_FORMATS" | jq -c '. + ["deb"]')
-          [ "${{ inputs.arm64_rpm }}"   = "true" ] && ARM_FORMATS=$(echo "$ARM_FORMATS" | jq -c '. + ["rpm"]')
-          [ "${{ inputs.arm64_tarxz }}" = "true" ] && ARM_FORMATS=$(echo "$ARM_FORMATS" | jq -c '. + ["tarxz"]')
-          [ "${{ inputs.arm64_pkg }}"   = "true" ] && ARM_FORMATS=$(echo "$ARM_FORMATS" | jq -c '. + ["pkg"]')
+          [ "${{ inputs.arm64_deb }}"   = "true" ] && ARM_FORMATS=$(echo "$ARM_FORMATS" | jq -c '. + ["deb"]')   || true
+          [ "${{ inputs.arm64_rpm }}"   = "true" ] && ARM_FORMATS=$(echo "$ARM_FORMATS" | jq -c '. + ["rpm"]')   || true
+          [ "${{ inputs.arm64_tarxz }}" = "true" ] && ARM_FORMATS=$(echo "$ARM_FORMATS" | jq -c '. + ["tarxz"]') || true
+          [ "${{ inputs.arm64_pkg }}"   = "true" ] && ARM_FORMATS=$(echo "$ARM_FORMATS" | jq -c '. + ["pkg"]')   || true
           if [ "$(echo "$ARM_FORMATS" | jq 'length')" -gt 0 ]; then
             MATRIX=$(echo "$MATRIX" | jq -c --argjson f "$ARM_FORMATS" \
               '.include += [{arch:"arm64", formats:$f}]')
@@ -103,6 +104,7 @@ jobs:
       - name: Resolve kernel ref
         id: resolve
         run: |
+          set -uo pipefail
           INPUT_REF="${{ inputs.kernel_ref }}"
           if [ -n "$INPUT_REF" ]; then
             echo "kernel_ref=$INPUT_REF" >> "$GITHUB_OUTPUT"
@@ -110,7 +112,8 @@ jobs:
             LATEST=$(git ls-remote --tags --refs --sort=-v:refname \
               https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux-stable.git \
               | awk -F/ '{print $NF}' \
-              | grep -E '^v[0-9]+\.[0-9]+(\.[0-9]+)?$' | head -1)
+              | grep -E '^v[0-9]+\.[0-9]+(\.[0-9]+)?$' \
+              | head -1 || true)
             [ -z "$LATEST" ] && { echo "ERROR: failed to detect" >&2; exit 1; }
             echo "kernel_ref=$LATEST" >> "$GITHUB_OUTPUT"
           fi
@@ -177,16 +180,19 @@ jobs:
 
     - name: Resolve and apply config
       run: |
+        set -euo pipefail
         CHOICE="${{ inputs.config_choice }}"
         CUSTOM="${{ inputs.config_custom }}"
         KARCH="${{ steps.arch.outputs.karch }}"
         CONFIG_OUT="/tmp/kernel.config"
 
-        [ -n "$CUSTOM" ] && CHOICE="$CUSTOM"
+        if [ -n "$CUSTOM" ]; then
+          CHOICE="$CUSTOM"
+        fi
 
         if [[ "$CHOICE" == http://* ]] || [[ "$CHOICE" == https://* ]]; then
           echo "==> Source: URL: $CHOICE"
-          curl -fSL "$CHOICE" -o "$CONFIG_OUT"
+          curl -fSL "$CHOICE" -o "$CONFIG_OUT" || { echo "ERROR: download $CHOICE failed" >&2; exit 1; }
         elif [ -f "$CHOICE" ]; then
           echo "==> Source: repo file: $CHOICE"
           cp "$CHOICE" "$CONFIG_OUT"
@@ -251,6 +257,14 @@ jobs:
         grep -nE 'DEBUG_INFO|BTF|RANDSTRUCT|WERROR|KALLSYMS|PAHOLE' .config || echo "(no matches)"
         echo "════════ end ════════"
 
+        # 验证 BTF 没被 Kconfig 剥离
+        if ! grep -q '^CONFIG_DEBUG_INFO_BTF=y' .config; then
+          echo "ERROR: CONFIG_DEBUG_INFO_BTF was stripped by olddefconfig" >&2
+          echo "---- BTF/DEBUG lines ----" >&2
+          grep -nE 'DEBUG_INFO|BTF|RANDSTRUCT|WERROR|KALLSYMS|PAHOLE' .config >&2 || true
+          exit 1
+        fi
+
     - name: Compile kernel
       run: |
         cd kernel-source
@@ -285,7 +299,8 @@ jobs:
 
         echo ""
         echo "──── STAGE layout ────"
-        find "$STAGE" -maxdepth 3 -type d | sort | head -30
+        find "$STAGE" -maxdepth 3 -type d | sort > /tmp/stage-list.txt 2>&1 || true
+        head -30 /tmp/stage-list.txt || true
         echo "──── boot/ ────"
         ls -la "$STAGE/boot"
 
@@ -321,14 +336,19 @@ jobs:
         EOF
         chmod 755 "$STAGE_DEB/DEBIAN/postinst"
 
-        ( cd "$STAGE_DEB" && find . -type f ! -path './DEBIAN/*' -exec md5sum {} \; > DEBIAN/md5sums )
+        # md5sums：去掉 ./ 前缀，一次调用处理多个文件
+        ( cd "$STAGE_DEB" && \
+          find . -type f ! -path './DEBIAN/*' -exec md5sum {} + \
+            | sed 's| \./| |' > DEBIAN/md5sums )
 
         mkdir -p dist/deb
         dpkg-deb --root-owner-group --build "$STAGE_DEB" \
           "dist/deb/linux-image-${KVER}_${KVER}-1_${DEB_ARCH}.deb"
 
-        echo "──── deb contents ────"
-        dpkg-deb -c "dist/deb/linux-image-${KVER}_${KVER}-1_${DEB_ARCH}.deb" | head -30
+        echo "──── deb contents (first 30 entries) ────"
+        dpkg-deb -c "dist/deb/linux-image-${KVER}_${KVER}-1_${DEB_ARCH}.deb" > /tmp/deb-list.txt 2>&1 || true
+        head -30 /tmp/deb-list.txt || true
+        ls -lh "dist/deb/"
 
     - name: Package as rpm
       if: contains(matrix.formats, 'rpm')
@@ -595,8 +615,9 @@ jobs:
         OUTNAME="linux-${KVER}-${ARCH}.tar.xz"
         ( cd "$STAGE_PARENT" && tar --owner=0 --group=0 -cJf "$OLDPWD/dist/tarxz/$OUTNAME" "$PKG_DIR" )
 
-        echo "──── tar.xz contents (top 20) ────"
-        tar -tJf "dist/tarxz/$OUTNAME" | head -20
+        echo "──── tar.xz contents (first 20 entries) ────"
+        tar -tJf "dist/tarxz/$OUTNAME" > /tmp/tarxz-list.txt 2>&1 || true
+        head -20 /tmp/tarxz-list.txt || true
         ls -lh "dist/tarxz/$OUTNAME"
 
     - name: Package as pkg.tar.zst
@@ -644,8 +665,9 @@ jobs:
         ( cd "$PKG_ROOT" && tar --owner=0 --group=0 -cf - . \
           | zstd -T0 -19 -o "$OLDPWD/dist/pkg/$OUTNAME" -f )
 
-        echo "──── pkg.tar.zst contents (top 20) ────"
-        tar --zstd -tf "dist/pkg/$OUTNAME" | head -20
+        echo "──── pkg.tar.zst contents (first 20 entries) ────"
+        tar --zstd -tf "dist/pkg/$OUTNAME" > /tmp/pkg-list.txt 2>&1 || true
+        head -20 /tmp/pkg-list.txt || true
         ls -lh "dist/pkg/$OUTNAME"
 
     - name: Collect artifacts
@@ -692,7 +714,7 @@ jobs:
 
   publish:
     needs: build
-    if: inputs.release_tag != ''
+    if: inputs.release_tag != '' && !cancelled()
     runs-on: ubuntu-latest
     concurrency:
       group: release-${{ inputs.release_tag }}
