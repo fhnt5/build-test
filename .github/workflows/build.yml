@@ -70,7 +70,6 @@ jobs:
         run: |
           MATRIX='{"include":[]}'
 
-          # x86_64 的格式列表
           X86_FORMATS="[]"
           [ "${{ inputs.x86_64_deb }}"   = "true" ] && X86_FORMATS=$(echo "$X86_FORMATS" | jq -c '. + ["deb"]')
           [ "${{ inputs.x86_64_rpm }}"   = "true" ] && X86_FORMATS=$(echo "$X86_FORMATS" | jq -c '. + ["rpm"]')
@@ -81,7 +80,6 @@ jobs:
               '.include += [{arch:"x86_64", formats:$f}]')
           fi
 
-          # arm64 的格式列表
           ARM_FORMATS="[]"
           [ "${{ inputs.arm64_deb }}"   = "true" ] && ARM_FORMATS=$(echo "$ARM_FORMATS" | jq -c '. + ["deb"]')
           [ "${{ inputs.arm64_rpm }}"   = "true" ] && ARM_FORMATS=$(echo "$ARM_FORMATS" | jq -c '. + ["rpm"]')
@@ -177,9 +175,6 @@ jobs:
         git clone --depth 1 --branch "${{ needs.resolve-ref.outputs.kernel_ref }}" \
           "${{ inputs.kernel_repo }}" kernel-source
 
-    # ==================================================================
-    # 配置：解析 → fix → olddefconfig（一次）
-    # ==================================================================
     - name: Resolve and apply config
       run: |
         CHOICE="${{ inputs.config_choice }}"
@@ -256,9 +251,6 @@ jobs:
         grep -nE 'DEBUG_INFO|BTF|RANDSTRUCT|WERROR|KALLSYMS|PAHOLE' .config || echo "(no matches)"
         echo "════════ end ════════"
 
-    # ==================================================================
-    # 编译内核（一次，之后所有格式共享）
-    # ==================================================================
     - name: Compile kernel
       run: |
         cd kernel-source
@@ -266,9 +258,6 @@ jobs:
         echo "Compiling kernel with -j$(nproc) ..."
         make ARCH="$KARCH" -j$(nproc)
 
-    # ==================================================================
-    # Stage：把编译产物集中到 STAGE 目录
-    # ==================================================================
     - name: Stage kernel artifacts
       id: stage
       run: |
@@ -300,9 +289,6 @@ jobs:
         echo "──── boot/ ────"
         ls -la "$STAGE/boot"
 
-    # ==================================================================
-    # 打包：deb
-    # ==================================================================
     - name: Package as deb
       if: contains(matrix.formats, 'deb')
       run: |
@@ -317,22 +303,22 @@ jobs:
         cp -a "$STAGE/lib"  "$STAGE_DEB/"
 
         cat > "$STAGE_DEB/DEBIAN/control" <<EOF
-Package: linux-image-${KVER}
-Version: ${KVER}-1
-Section: kernel
-Priority: optional
-Architecture: ${DEB_ARCH}
-Maintainer: CI <ci@example.com>
-Description: Custom Linux kernel ${KVER}
-EOF
+        Package: linux-image-${KVER}
+        Version: ${KVER}-1
+        Section: kernel
+        Priority: optional
+        Architecture: ${DEB_ARCH}
+        Maintainer: CI <ci@example.com>
+        Description: Custom Linux kernel ${KVER}
+        EOF
 
         cat > "$STAGE_DEB/DEBIAN/postinst" <<EOF
-#!/bin/sh
-set -e
-if command -v depmod >/dev/null 2>&1; then
-    depmod ${KVER} || :
-fi
-EOF
+        #!/bin/sh
+        set -e
+        if command -v depmod >/dev/null 2>&1; then
+            depmod ${KVER} || :
+        fi
+        EOF
         chmod 755 "$STAGE_DEB/DEBIAN/postinst"
 
         ( cd "$STAGE_DEB" && find . -type f ! -path './DEBIAN/*' -exec md5sum {} \; > DEBIAN/md5sums )
@@ -344,9 +330,6 @@ EOF
         echo "──── deb contents ────"
         dpkg-deb -c "dist/deb/linux-image-${KVER}_${KVER}-1_${DEB_ARCH}.deb" | head -30
 
-    # ==================================================================
-    # 打包：rpm
-    # ==================================================================
     - name: Package as rpm
       if: contains(matrix.formats, 'rpm')
       run: |
@@ -360,33 +343,33 @@ EOF
 
         SPEC="$RPM_DIR/SPECS/linux-custom.spec"
         cat > "$SPEC" <<EOF
-Name:           linux-custom
-Version:        ${RPM_VERSION}
-Release:        1
-Summary:        Custom Linux kernel ${KVER}
-License:        GPL-2.0-only
-AutoReqProv:    no
-BuildArch:      ${RPM_ARCH}
+        Name:           linux-custom
+        Version:        ${RPM_VERSION}
+        Release:        1
+        Summary:        Custom Linux kernel ${KVER}
+        License:        GPL-2.0-only
+        AutoReqProv:    no
+        BuildArch:      ${RPM_ARCH}
 
-%global __strip /bin/true
-%global __os_install_post %{nil}
+        %global __strip /bin/true
+        %global __os_install_post %{nil}
 
-%description
-Custom Linux kernel ${KVER}.
+        %description
+        Custom Linux kernel ${KVER}.
 
-%install
-mkdir -p %{buildroot}
-cp -a ${STAGE}/. %{buildroot}/
+        %install
+        mkdir -p %{buildroot}
+        cp -a ${STAGE}/. %{buildroot}/
 
-%files
-/boot/vmlinuz-*
-/boot/System.map-*
-/boot/config-*
-/lib/modules/*
+        %files
+        /boot/vmlinuz-*
+        /boot/System.map-*
+        /boot/config-*
+        /lib/modules/*
 
-%post
-/sbin/depmod ${KVER} >/dev/null 2>&1 || :
-EOF
+        %post
+        /sbin/depmod ${KVER} >/dev/null 2>&1 || :
+        EOF
 
         rpmbuild --define "_topdir $RPM_DIR" -bb "$SPEC"
 
@@ -396,9 +379,6 @@ EOF
         echo "──── rpm artifacts ────"
         ls -lh dist/rpm/
 
-    # ==================================================================
-    # 打包：tar.xz（模板只准备一次）
-    # ==================================================================
     - name: Prepare tarxz helper templates
       if: contains(matrix.formats, 'tarxz')
       run: |
@@ -619,9 +599,6 @@ EOF
         tar -tJf "dist/tarxz/$OUTNAME" | head -20
         ls -lh "dist/tarxz/$OUTNAME"
 
-    # ==================================================================
-    # 打包：pkg.tar.zst（手工 tar + .PKGINFO + .INSTALL）
-    # ==================================================================
     - name: Package as pkg.tar.zst
       if: contains(matrix.formats, 'pkg')
       run: |
@@ -635,32 +612,32 @@ EOF
         cp -a "$STAGE/lib"  "$PKG_ROOT/"
 
         cat > "$PKG_ROOT/.PKGINFO" <<EOF
-pkgname = linux-custom
-pkgbase = linux-custom
-pkgver = ${KVER}-1
-pkgdesc = Custom Linux kernel ${KVER}
-url = https://kernel.org
-builddate = $(date +%s)
-packager = CI <ci@example.com>
-size = $(du -sb "$PKG_ROOT" | cut -f1)
-arch = ${ARCH}
-license = GPL-2.0-only
-EOF
+        pkgname = linux-custom
+        pkgbase = linux-custom
+        pkgver = ${KVER}-1
+        pkgdesc = Custom Linux kernel ${KVER}
+        url = https://kernel.org
+        builddate = $(date +%s)
+        packager = CI <ci@example.com>
+        size = $(du -sb "$PKG_ROOT" | cut -f1)
+        arch = ${ARCH}
+        license = GPL-2.0-only
+        EOF
 
         cat > "$PKG_ROOT/.INSTALL" <<EOF
-post_install() {
-    /sbin/depmod ${KVER} >/dev/null 2>&1 || :
-}
-post_upgrade() {
-    post_install
-}
-pre_remove() {
-    :
-}
-post_remove() {
-    :
-}
-EOF
+        post_install() {
+            /sbin/depmod ${KVER} >/dev/null 2>&1 || :
+        }
+        post_upgrade() {
+            post_install
+        }
+        pre_remove() {
+            :
+        }
+        post_remove() {
+            :
+        }
+        EOF
 
         mkdir -p dist/pkg
         OUTNAME="linux-custom-${KVER}-1-${ARCH}.pkg.tar.zst"
@@ -671,9 +648,6 @@ EOF
         tar --zstd -tf "dist/pkg/$OUTNAME" | head -20
         ls -lh "dist/pkg/$OUTNAME"
 
-    # ==================================================================
-    # 汇总 & 上传
-    # ==================================================================
     - name: Collect artifacts
       if: always() && !cancelled()
       run: |
@@ -729,7 +703,9 @@ EOF
           path: dist
           pattern: kernel-*
           merge-multiple: true
-      - run: ls -lh dist/
+      - run: |
+          ls -lh dist/
+          test -n "$(find dist -maxdepth 1 -type f -print -quit)"
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ inputs.release_tag }}
