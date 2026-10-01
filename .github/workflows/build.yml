@@ -253,12 +253,7 @@ jobs:
           base-devel git libarchive jq bc rsync kmod inetutils \
           elfutils debugedit zstd pahole
 
-        # ── 关键修复 A：关闭 -Werror=format-security ──
-        # 原因：bpftool bootstrap 编译时，host cc1 收到 -Wformat-security
-        #       但缺少 -Wformat 上下文，原本只是警告，被 -Werror=format-security
-        #       升级为致命错误，导致 vmlinux.h 生成失败。
-        # 修改 /etc/makepkg.conf 是唯一可靠的方式（环境变量 CFLAGS 会被 makepkg
-        # 从 makepkg.conf 覆盖）。
+        # 关掉 -Werror=format-security（bpftool bootstrap 编译用）
         sed -i 's/-Werror=format-security/-Wno-error=format-security/g' /etc/makepkg.conf
         echo "---- makepkg.conf CFLAGS after patch ----"
         grep -E '^(CFLAGS|CXXFLAGS)=' /etc/makepkg.conf || true
@@ -319,18 +314,10 @@ jobs:
 
         sed -i "s/^pkgbase=.*/pkgbase=linux-custom/" PKGBUILD
 
-        # ── 关键修复 B：跳过 htmldocs 目标 ──
-        # 原因：Arch 的 linux PKGBUILD 的 build() 会调用 make htmldocs，
-        #       需要 python-yaml + 一整套 TeX Live（数 GB），在 CI 中不可能装全。
-        #       文档对内核二进制包毫无用处，直接注释掉那一行。
-        sed -i 's/make htmldocs/: # htmldocs disabled by build script/g' PKGBUILD
-        echo "---- PKGBUILD htmldocs check (after patch) ----"
-        if grep -q htmldocs PKGBUILD; then
-          echo "WARN: htmldocs still referenced in PKGBUILD:"
-          grep -n htmldocs PKGBUILD
-        else
-          echo "OK: no htmldocs references found"
-        fi
+        # 跳过 htmldocs（需 python-yaml + TeX Live 几 GB）
+        sed -i 's/make htmldocs/: # htmldocs disabled/g' PKGBUILD
+        echo "---- PKGBUILD htmldocs check ----"
+        grep -q htmldocs PKGBUILD && { echo "WARN: htmldocs still present:"; grep -n htmldocs PKGBUILD; } || echo "OK: no htmldocs"
         echo "---- end ----"
 
         mkdir -p src
@@ -342,10 +329,6 @@ jobs:
 
         sed -i -E "s|cp[[:space:]]+(\"?\\\$\{srcdir\}/)?\.?\.?/?config\.[^[:space:]\"]+[[:space:]]+\.config|cp /tmp/kernel.config .config|g" PKGBUILD
         sed -i -E "s|cp[[:space:]]+\"?\\\$\{srcdir\}/config\"?[[:space:]]+\.config|cp /tmp/kernel.config .config|g" PKGBUILD
-
-        echo "──── PKGBUILD config references (after patch) ────"
-        grep -nE '(^|[^a-zA-Z_])config([^a-zA-Z_]|$|\.)' PKGBUILD | head -30 || true
-        echo "──── end ────"
 
         echo ""
         echo "════════════ makepkg -o (prepare only) ════════════"
@@ -359,26 +342,72 @@ jobs:
         [ -n "$SRC_DIR" ] || { echo "FATAL: no source dir" >&2; exit 1; }
 
         cp ~/kernel.config "$SRC_DIR/.config"
-
         fix_kconfig "$SRC_DIR/.config"
+
         if ! check_kconfig "$SRC_DIR/.config"; then
           echo "FATAL: kconfig check failed" >&2
           grep -nE 'DEBUG_INFO|BTF|RANDSTRUCT|WERROR|ORPHAN' "$SRC_DIR/.config" >&2
           exit 1
         fi
 
-        PAHOLE_FLAGS="$SRC_DIR/scripts/pahole-flags.sh"
-        if [ -f "$PAHOLE_FLAGS" ] && ! grep -q 'skip_encoding_btf_enum64' "$PAHOLE_FLAGS"; then
-          printf '\nif [ "${pahole_ver}" -ge "124" ]; then\n  extra_paholeopt="${extra_paholeopt} --skip_encoding_btf_enum64"\nfi\n' >> "$PAHOLE_FLAGS"
+        # ── 关键：手动跑一次 syncconfig，让 auto.conf 与 .config 一致 ──
+        # 目的：避免 makepkg -e 里的 make 首次触发 syncconfig 时把 BTF 选项关掉。
+        #      若 syncconfig 后 BTF 被关，说明 7.2.8 有新依赖我们没满足，立刻报错。
+        case "$(uname -m)" in
+          x86_64|amd64) KARCH_SYNC="x86_64" ;;
+          aarch64|arm64) KARCH_SYNC="arm64" ;;
+          *) KARCH_SYNC="$(uname -m)" ;;
+        esac
+        echo ""
+        echo "════════════ make syncconfig ════════════"
+        (cd "$SRC_DIR" && make ARCH="$KARCH_SYNC" syncconfig >/dev/null 2>&1) \
+          || echo "WARN: syncconfig returned non-zero"
+        echo ""
+        echo "════════════ Verifying kconfig after syncconfig ════════════"
+        if ! check_kconfig "$SRC_DIR/.config"; then
+          echo "FATAL: BTF config was stripped by syncconfig (7.2.8 dependency missing)" >&2
+          grep -nE 'DEBUG_INFO|BTF|RANDSTRUCT|WERROR|ORPHAN' "$SRC_DIR/.config" >&2
+          exit 1
         fi
+        echo "kconfig still OK after syncconfig."
 
-        # makepkg 没有 --keep 长选项；这里不加，构建失败时 makepkg 默认保留 srcdir
         echo ""
         echo "════════════ makepkg -e (build only) ════════════"
         makepkg -e --noconfirm --nodeps --ignorearch --skipinteg
         BUILD_RC=$?
         echo "makepkg -e exit code: $BUILD_RC"
-        exit $BUILD_RC
+
+        # ── 诊断 ──
+        echo ""
+        echo "════════════ CONTAINER-SIDE DIAGNOSTICS ════════════"
+        echo "[1] .config BTF/WERROR lines:"
+        grep -nE 'DEBUG_INFO|BTF|RANDSTRUCT|WERROR|ORPHAN' "$SRC_DIR/.config" || echo "(none)"
+        echo ""
+        echo "[2] vmlinux files:"
+        ls -la "$SRC_DIR"/vmlinux* 2>/dev/null || echo "(no vmlinux files)"
+        echo ""
+        echo "[3] vmlinux .BTF section:"
+        if [ -f "$SRC_DIR/vmlinux" ]; then
+          readelf -S "$SRC_DIR/vmlinux" 2>/dev/null | grep -i BTF || echo "(NO .BTF SECTION)"
+        else
+          echo "(no vmlinux)"
+        fi
+        echo ""
+        echo "[4] .vmlinux.btf.cmd:"
+        [ -f "$SRC_DIR/.vmlinux.btf.cmd" ] && cat "$SRC_DIR/.vmlinux.btf.cmd" || echo "(not found)"
+        echo ""
+        echo "[5] scripts/pahole-flags.sh:"
+        if [ -f "$SRC_DIR/scripts/pahole-flags.sh" ]; then
+          cat "$SRC_DIR/scripts/pahole-flags.sh"
+        else
+          echo "(file not found)"
+        fi
+        echo ""
+        echo "[6] pahole version:"
+        pahole --version 2>&1 || true
+        echo "════════════════════════════════════════════════════"
+
+        exit "${BUILD_RC:-1}"
         BUILDER_EOF
         chmod +x "$STAGE/builder-part.sh"
 
