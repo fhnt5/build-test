@@ -72,19 +72,19 @@ on:
         type: boolean
         default: true
       include_headers:
-        description: 'Build headers'
+        description: 'Build headers packages'
         type: boolean
         default: true
       headers_full_tree:
-        description: 'Full headers tree'
+        description: 'Full source tree in headers'
         type: boolean
         default: true
       strip_modules:
-        description: 'Strip modules'
+        description: 'Strip module symbols'
         type: boolean
         default: false
       tarxz_include_headers:
-        description: 'Headers in tar.xz'
+        description: 'Include headers in tar.xz'
         type: boolean
         default: true
       parallel_jobs:
@@ -103,34 +103,27 @@ on:
         description: 'Enable ccache'
         type: boolean
         default: false
-      lto_clang:
-        description: 'LLVM LTO full'
-        type: boolean
-        default: false
-      thin_lto:
-        description: 'ThinLTO'
-        type: boolean
-        default: false
-      disable_log_spam:
-        description: 'Disable debug log spam'
-        type: boolean
-        default: false
-      performance_tune:
-        description: 'Performance tuning'
-        type: boolean
-        default: false
-      low_latency:
-        description: 'Low latency'
-        type: boolean
-        default: false
-      debug_off:
-        description: 'Disable all debug'
-        type: boolean
-        default: false
-      size_optimize:
-        description: 'Size optimize'
-        type: boolean
-        default: false
+      lto_mode:
+        description: 'LLVM LTO mode'
+        type: choice
+        required: false
+        default: 'none'
+        options:
+          - 'none'
+          - 'full'
+          - 'thin'
+      tune_profile:
+        description: 'Kernel tuning profile'
+        type: choice
+        required: false
+        default: 'none'
+        options:
+          - 'none'
+          - 'default'
+          - 'performance'
+          - 'lowlatency'
+          - 'minimal'
+          - 'debugoff'
       kernel_repo:
         description: 'Kernel repo URL'
         type: string
@@ -373,75 +366,75 @@ jobs:
             make ARCH="$KARCH" olddefconfig </dev/null
           fi
 
-      - name: Apply optimization tweaks
+      - name: Apply tuning profile
         run: |
           set -euo pipefail
           cd kernel-source
           KARCH="${{ steps.arch.outputs.karch }}"
           TWEAKED=false
 
-          if [ "${{ inputs.disable_log_spam }}" = "true" ]; then
-            TWEAKED=true
-            for c in DEBUG_BUGVERBOSE DEBUG_LIST DEBUG_SG DEBUG_NOTIFIERS DEBUG_CREDENTIALS \
-                      RCU_TRACE SCHED_DEBUG PRINTK_TIME DYNAMIC_DEBUG DEBUG_ATOMIC_SLEEP \
-                      DEBUG_PREEMPT DEBUG_SPINLOCK DEBUG_MUTEXES DEBUG_RT_MUTEXES \
-                      DEBUG_WW_MUTEX_SLOWPATH DEBUG_LOCK_ALLOC DEBUG_LOCKDEP \
-                      DEBUG_KOBJECT DEBUG_KOBJECT_RELEASE; do
-              sed -i "/^CONFIG_${c}=/d" .config
-              echo "# CONFIG_${c} is not set" >> .config
-            done
-          fi
-
-          if [ "${{ inputs.performance_tune }}" = "true" ]; then
-            TWEAKED=true
-            for c in NO_HZ_FULL RCU_NOCBS PREEMPT_DYNAMIC CPU_FREQ_DEFAULT_GOV_PERFORMANCE; do
-              sed -i "/^CONFIG_${c}=/d" .config
-              echo "CONFIG_${c}=y" >> .config
-            done
-            for c in MITIGATION_RETPOLINE MITIGATION_SPECTRE_BHI MITIGATION_IBPB_ENTRY \
-                      MITIGATION_IBRS_ENTRY MITIGATION_L1TF MITIGATION_PTI; do
-              sed -i "/^CONFIG_${c}=/d" .config
-              echo "# CONFIG_${c} is not set" >> .config
-            done
-            sed -i '/^CONFIG_CPU_FREQ_DEFAULT_GOV_ONDEMAND=/d' .config
-            echo "# CONFIG_CPU_FREQ_DEFAULT_GOV_ONDEMAND is not set" >> .config
-          fi
-
-          if [ "${{ inputs.low_latency }}" = "true" ]; then
-            TWEAKED=true
-            sed -i '/^CONFIG_PREEMPT=/d' .config
-            sed -i '/^CONFIG_PREEMPT_VOLUNTARY=/d' .config
-            sed -i '/^CONFIG_PREEMPT_NONE=/d' .config
-            echo "CONFIG_PREEMPT=y" >> .config
-            sed -i '/^CONFIG_HZ_250=/d' .config
-            sed -i '/^CONFIG_HZ_300=/d' .config
-            sed -i '/^CONFIG_HZ_100=/d' .config
-            echo "CONFIG_HZ_1000=y" >> .config
-            sed -i '/^CONFIG_RCU_BOOST=/d' .config
-            echo "CONFIG_RCU_BOOST=y" >> .config
-          fi
-
-          if [ "${{ inputs.debug_off }}" = "true" ]; then
-            TWEAKED=true
-            for c in KASAN KMSAN KCSAN KFENCE KMEMLEAK DEBUG_INFO DWARF_TOOLCHAIN_DEFAULT \
-                      FTRACE FUNCTION_TRACER FUNCTION_GRAPH_TRACER STACK_TRACER \
-                      KPROBES UPROBES TRACEPOINTS DEBUG_FS SLUB_DEBUG \
-                      DEBUG_PAGEALLOC DEBUG_KMEMLEAK DEBUG_STACK_USAGE \
-                      SCHEDSTATS LATENCYTOP LOCK_STAT; do
-              sed -i "/^CONFIG_${c}=/d" .config
-              echo "# CONFIG_${c} is not set" >> .config
-            done
-          fi
-
-          if [ "${{ inputs.size_optimize }}" = "true" ]; then
-            TWEAKED=true
-            sed -i '/^CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE=/d' .config
-            echo "CONFIG_CC_OPTIMIZE_FOR_SIZE=y" >> .config
-            for c in MODULE_SIG MODULE_SIG_ALL MODULE_SIG_FORCE; do
-              sed -i "/^CONFIG_${c}=/d" .config
-              echo "# CONFIG_${c} is not set" >> .config
-            done
-          fi
+          case "${{ inputs.tune_profile }}" in
+            performance)
+              TWEAKED=true
+              for c in NO_HZ_FULL RCU_NOCBS PREEMPT_DYNAMIC CPU_FREQ_DEFAULT_GOV_PERFORMANCE; do
+                sed -i "/^CONFIG_${c}=/d" .config
+                echo "CONFIG_${c}=y" >> .config
+              done
+              for c in MITIGATION_RETPOLINE MITIGATION_SPECTRE_BHI MITIGATION_IBPB_ENTRY \
+                        MITIGATION_IBRS_ENTRY MITIGATION_L1TF MITIGATION_PTI; do
+                sed -i "/^CONFIG_${c}=/d" .config
+                echo "# CONFIG_${c} is not set" >> .config
+              done
+              sed -i '/^CONFIG_CPU_FREQ_DEFAULT_GOV_ONDEMAND=/d' .config
+              echo "# CONFIG_CPU_FREQ_DEFAULT_GOV_ONDEMAND is not set" >> .config
+              ;;
+            lowlatency)
+              TWEAKED=true
+              sed -i '/^CONFIG_PREEMPT=/d' .config
+              sed -i '/^CONFIG_PREEMPT_VOLUNTARY=/d' .config
+              sed -i '/^CONFIG_PREEMPT_NONE=/d' .config
+              echo "CONFIG_PREEMPT=y" >> .config
+              sed -i '/^CONFIG_HZ_250=/d' .config
+              sed -i '/^CONFIG_HZ_300=/d' .config
+              sed -i '/^CONFIG_HZ_100=/d' .config
+              echo "CONFIG_HZ_1000=y" >> .config
+              sed -i '/^CONFIG_RCU_BOOST=/d' .config
+              echo "CONFIG_RCU_BOOST=y" >> .config
+              ;;
+            minimal)
+              TWEAKED=true
+              sed -i '/^CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE=/d' .config
+              echo "CONFIG_CC_OPTIMIZE_FOR_SIZE=y" >> .config
+              for c in MODULE_SIG MODULE_SIG_ALL MODULE_SIG_FORCE; do
+                sed -i "/^CONFIG_${c}=/d" .config
+                echo "# CONFIG_${c} is not set" >> .config
+              done
+              ;;
+            debugoff)
+              TWEAKED=true
+              for c in KASAN KMSAN KCSAN KFENCE KMEMLEAK DEBUG_INFO DWARF_TOOLCHAIN_DEFAULT \
+                        FTRACE FUNCTION_TRACER FUNCTION_GRAPH_TRACER STACK_TRACER \
+                        KPROBES UPROBES TRACEPOINTS DEBUG_FS SLUB_DEBUG \
+                        DEBUG_PAGEALLOC DEBUG_KMEMLEAK DEBUG_STACK_USAGE \
+                        SCHEDSTATS LATENCYTOP LOCK_STAT; do
+                sed -i "/^CONFIG_${c}=/d" .config
+                echo "# CONFIG_${c} is not set" >> .config
+              done
+              ;;
+            default)
+              TWEAKED=true
+              for c in DEBUG_BUGVERBOSE DEBUG_LIST DEBUG_SG DEBUG_NOTIFIERS DEBUG_CREDENTIALS \
+                        RCU_TRACE SCHED_DEBUG PRINTK_TIME DYNAMIC_DEBUG DEBUG_ATOMIC_SLEEP \
+                        DEBUG_PREEMPT DEBUG_SPINLOCK DEBUG_MUTEXES DEBUG_RT_MUTEXES \
+                        DEBUG_WW_MUTEX_SLOWPATH DEBUG_LOCK_ALLOC DEBUG_LOCKDEP \
+                        DEBUG_KOBJECT DEBUG_KOBJECT_RELEASE; do
+                sed -i "/^CONFIG_${c}=/d" .config
+                echo "# CONFIG_${c} is not set" >> .config
+              done
+              ;;
+            none)
+              ;;
+          esac
 
           if [ "$TWEAKED" = "true" ] && [ "${{ inputs.respect_config }}" != "true" ]; then
             make ARCH="$KARCH" olddefconfig </dev/null
@@ -466,23 +459,20 @@ jobs:
             export HOSTCC="ccache gcc"
           fi
 
-          if [ "${{ inputs.lto_clang }}" = "true" ] || [ "${{ inputs.thin_lto }}" = "true" ]; then
+          LTO="${{ inputs.lto_mode }}"
+          if [ "$LTO" != "none" ]; then
             MAKE_ARGS="$MAKE_ARGS LLVM=1"
-            if [ "${{ inputs.lto_clang }}" = "true" ]; then
-              sed -i '/^CONFIG_LTO=/d' .config
-              echo "CONFIG_LTO=y" >> .config
+            sed -i '/^CONFIG_LTO=/d' .config
+            echo "CONFIG_LTO=y" >> .config
+            if [ "$LTO" = "full" ]; then
               sed -i '/^CONFIG_LTO_CLANG_FULL=/d' .config
               echo "CONFIG_LTO_CLANG_FULL=y" >> .config
-              sed -i '/^CONFIG_LTO_NONE=/d' .config
-              echo "# CONFIG_LTO_NONE is not set" >> .config
             else
-              sed -i '/^CONFIG_LTO=/d' .config
-              echo "CONFIG_LTO=y" >> .config
               sed -i '/^CONFIG_LTO_CLANG_THIN=/d' .config
               echo "CONFIG_LTO_CLANG_THIN=y" >> .config
-              sed -i '/^CONFIG_LTO_NONE=/d' .config
-              echo "# CONFIG_LTO_NONE is not set" >> .config
             fi
+            sed -i '/^CONFIG_LTO_NONE=/d' .config
+            echo "# CONFIG_LTO_NONE is not set" >> .config
           fi
 
           make $MAKE_ARGS
