@@ -5,10 +5,12 @@ on:
     inputs:
       x86_64_deb:   { description: 'x86_64  ›  deb', type: boolean, default: true }
       x86_64_rpm:   { description: 'x86_64  ›  rpm', type: boolean, default: false }
-      x86_64_tarxz: { description: 'x86_64  ›  tar.xz（全发行版通用 + install/uninstall 脚本）', type: boolean, default: false }
+      x86_64_tarxz: { description: 'x86_64  ›  tar.xz（全发行版通用 + install/uninstall）', type: boolean, default: false }
+      x86_64_pkg:   { description: 'x86_64  ›  pkg.tar.zst（Arch 包）', type: boolean, default: false }
       arm64_deb:    { description: 'arm64   ›  deb', type: boolean, default: false }
       arm64_rpm:    { description: 'arm64   ›  rpm', type: boolean, default: false }
-      arm64_tarxz:  { description: 'arm64   ›  tar.xz（全发行版通用 + install/uninstall 脚本）', type: boolean, default: false }
+      arm64_tarxz:  { description: 'arm64   ›  tar.xz（全发行版通用 + install/uninstall）', type: boolean, default: false }
+      arm64_pkg:    { description: 'arm64   ›  pkg.tar.zst（Arch 包）', type: boolean, default: false }
       config_choice:
         description: '内核配置来源：内核自带目标 / 仓库 configs/* / 发行版'
         type: choice
@@ -71,16 +73,27 @@ jobs:
         id: gen
         run: |
           MATRIX='{"include":[]}'
-          add() {
-            MATRIX=$(echo "$MATRIX" | jq -c --arg a "$1" --arg f "$2" \
-              '.include += [{arch:$a, format:$f}]')
-          }
-          [ "${{ inputs.x86_64_deb }}"   = "true" ] && add x86_64 deb
-          [ "${{ inputs.x86_64_rpm }}"   = "true" ] && add x86_64 rpm
-          [ "${{ inputs.x86_64_tarxz }}" = "true" ] && add x86_64 tarxz
-          [ "${{ inputs.arm64_deb }}"    = "true" ] && add arm64  deb
-          [ "${{ inputs.arm64_rpm }}"    = "true" ] && add arm64  rpm
-          [ "${{ inputs.arm64_tarxz }}"  = "true" ] && add arm64  tarxz
+
+          X86_FORMATS="[]"
+          [ "${{ inputs.x86_64_deb }}"   = "true" ] && X86_FORMATS=$(echo "$X86_FORMATS" | jq -c '. + ["deb"]')
+          [ "${{ inputs.x86_64_rpm }}"   = "true" ] && X86_FORMATS=$(echo "$X86_FORMATS" | jq -c '. + ["rpm"]')
+          [ "${{ inputs.x86_64_tarxz }}" = "true" ] && X86_FORMATS=$(echo "$X86_FORMATS" | jq -c '. + ["tarxz"]')
+          [ "${{ inputs.x86_64_pkg }}"   = "true" ] && X86_FORMATS=$(echo "$X86_FORMATS" | jq -c '. + ["pkg"]')
+          if [ "$(echo "$X86_FORMATS" | jq 'length')" -gt 0 ]; then
+            MATRIX=$(echo "$MATRIX" | jq -c --argjson f "$X86_FORMATS" \
+              '.include += [{arch:"x86_64", formats:$f}]')
+          fi
+
+          ARM_FORMATS="[]"
+          [ "${{ inputs.arm64_deb }}"   = "true" ] && ARM_FORMATS=$(echo "$ARM_FORMATS" | jq -c '. + ["deb"]')
+          [ "${{ inputs.arm64_rpm }}"   = "true" ] && ARM_FORMATS=$(echo "$ARM_FORMATS" | jq -c '. + ["rpm"]')
+          [ "${{ inputs.arm64_tarxz }}" = "true" ] && ARM_FORMATS=$(echo "$ARM_FORMATS" | jq -c '. + ["tarxz"]')
+          [ "${{ inputs.arm64_pkg }}"   = "true" ] && ARM_FORMATS=$(echo "$ARM_FORMATS" | jq -c '. + ["pkg"]')
+          if [ "$(echo "$ARM_FORMATS" | jq 'length')" -gt 0 ]; then
+            MATRIX=$(echo "$MATRIX" | jq -c --argjson f "$ARM_FORMATS" \
+              '.include += [{arch:"arm64", formats:$f}]')
+          fi
+
           COUNT=$(echo "$MATRIX" | jq '.include | length')
           echo "MATRIX = $MATRIX"
           [ "$COUNT" -eq 0 ] && { echo "No build target selected." >&2; exit 1; }
@@ -194,23 +207,27 @@ jobs:
 
     - name: Show build target
       run: |
-        echo "Arch:   ${{ matrix.arch }}"
-        echo "Format: ${{ matrix.format }}"
-        echo "Ref:    ${{ needs.resolve-ref.outputs.kernel_ref }}"
-        echo "Runner: ${{ runner.os }} / ${{ runner.arch }}"
-        echo "Debug:  ${{ inputs.debug_verbose }}"
+        echo "Arch:    ${{ matrix.arch }}"
+        echo "Formats: ${{ join(matrix.formats, ', ') }}"
+        echo "Ref:     ${{ needs.resolve-ref.outputs.kernel_ref }}"
+        echo "Runner:  ${{ runner.os }} / ${{ runner.arch }}"
+        echo "Debug:   ${{ inputs.debug_verbose }}"
 
     - name: Set arch variables
       id: arch
       run: |
         case "${{ matrix.arch }}" in
           x86_64|amd64)
-            echo "karch=x86_64"   >> "$GITHUB_OUTPUT"
-            echo "deb_arch=amd64" >> "$GITHUB_OUTPUT"
+            echo "karch=x86_64"       >> "$GITHUB_OUTPUT"
+            echo "deb_arch=amd64"     >> "$GITHUB_OUTPUT"
+            echo "rpm_arch=x86_64"    >> "$GITHUB_OUTPUT"
+            echo "arch_boot=arch/x86/boot/bzImage" >> "$GITHUB_OUTPUT"
             ;;
           arm64|aarch64)
-            echo "karch=arm64"    >> "$GITHUB_OUTPUT"
-            echo "deb_arch=arm64" >> "$GITHUB_OUTPUT"
+            echo "karch=arm64"        >> "$GITHUB_OUTPUT"
+            echo "deb_arch=arm64"     >> "$GITHUB_OUTPUT"
+            echo "rpm_arch=aarch64"   >> "$GITHUB_OUTPUT"
+            echo "arch_boot=arch/arm64/boot/Image" >> "$GITHUB_OUTPUT"
             ;;
           *)
             echo "Unsupported arch" >&2
@@ -230,11 +247,8 @@ jobs:
           build-essential libncurses-dev bison flex \
           libssl-dev libelf-dev libdw-dev elfutils \
           bc dwarves zstd cpio rsync kmod xz-utils \
+          dpkg-dev rpm \
           git jq curl
-        case "${{ matrix.format }}" in
-          deb) sudo apt-get install -y debhelper fakeroot ;;
-          rpm) sudo apt-get install -y rpm rpm2cpio cpio ;;
-        esac
 
     - name: Clone kernel source
       run: |
@@ -253,22 +267,18 @@ jobs:
         if [[ "$CHOICE" == http://* ]] || [[ "$CHOICE" == https://* ]]; then
           echo "==> Source: URL: $CHOICE"
           curl -fSL "$CHOICE" -o "$CONFIG_OUT"
-          echo "CONFIG_SOURCE=$CHOICE" >> "$GITHUB_ENV"
         elif [ -f "$CHOICE" ]; then
           echo "==> Source: repo file: $CHOICE"
           cp "$CHOICE" "$CONFIG_OUT"
-          echo "CONFIG_SOURCE=$CHOICE" >> "$GITHUB_ENV"
         elif [ -f "configs/$CHOICE" ]; then
           echo "==> Source: repo file: configs/$CHOICE"
           cp "configs/$CHOICE" "$CONFIG_OUT"
-          echo "CONFIG_SOURCE=configs/$CHOICE" >> "$GITHUB_ENV"
         elif [[ "$CHOICE" =~ ^(default|allyesconfig|allmodconfig|allnoconfig|tinyconfig)$ ]]; then
           echo "==> Source: kernel built-in target: make $CHOICE"
           cd kernel-source
           make ARCH="$KARCH" "$CHOICE"
           cp .config "$CONFIG_OUT"
           cd ..
-          echo "CONFIG_SOURCE=kernel built-in: $CHOICE" >> "$GITHUB_ENV"
         else
           case "$CHOICE" in
             alma)     URL='https://git.almalinux.org/rpms/kernel/-/raw/c9/f/kernel-x86_64-fedora.config' ;;
@@ -290,7 +300,6 @@ jobs:
           esac
           echo "==> Source: distro '$CHOICE' -> $URL"
           curl -fSL "$URL" -o "$CONFIG_OUT" || { echo "ERROR: download $URL failed" >&2; exit 1; }
-          echo "CONFIG_SOURCE=$CHOICE ($URL)" >> "$GITHUB_ENV"
         fi
 
         [ -s "$CONFIG_OUT" ] || { echo "ERROR: empty config" >&2; exit 1; }
@@ -322,48 +331,152 @@ jobs:
         grep -nE 'DEBUG_INFO|BTF|RANDSTRUCT|WERROR|KALLSYMS|PAHOLE' .config || echo "(no matches)"
         echo "════════ end ════════"
 
-    - name: Build kernel packages (deb / rpm)
-      if: matrix.format == 'deb' || matrix.format == 'rpm'
+    - name: Compile kernel
       env:
         DEBUG_VERBOSE: ${{ inputs.debug_verbose }}
       run: |
         set -uo pipefail
-        [ "${DEBUG_VERBOSE}" = "true" ] && set -x
+        if [ "${DEBUG_VERBOSE}" = "true" ]; then set -x; fi
 
-        LOG="/tmp/build-${{ matrix.format }}-${{ matrix.arch }}.log"
-        mkdir -p dist-debug
         cd kernel-source
+        KARCH="${{ steps.arch.outputs.karch }}"
+        LOG="/tmp/build-kernel-${{ matrix.arch }}.log"
 
-        case "${{ matrix.format }}" in
-          deb)
-            make ARCH=${{ steps.arch.outputs.karch }} \
-                 KDEB_ARCH=${{ steps.arch.outputs.deb_arch }} \
-                 KDEB_OPTS="-a${{ steps.arch.outputs.deb_arch }}" \
-                 DEB_EXCLUDE_PKG="linux-libc-dev linux-image-%-dbg" \
-                 -j$(nproc) bindeb-pkg 2>&1 | tee "$LOG"
-            RC=${PIPESTATUS[0]}
-            ;;
-          rpm)
-            make ARCH=${{ steps.arch.outputs.karch }} \
-                 KCFLAGS="-g0" \
-                 RPM_BUILD_NCPUS=$(nproc) \
-                 RPMOPTS="--define '_topdir $PWD/rpmbuild'" \
-                 -j$(nproc) binrpm-pkg 2>&1 | tee "$LOG"
-            RC=${PIPESTATUS[0]}
-            ;;
-        esac
+        echo "Compiling kernel with -j$(nproc) ..."
+        make ARCH="$KARCH" -j$(nproc) 2>&1 | tee "$LOG"
+        RC=${PIPESTATUS[0]}
 
-        echo "make exit code: $RC"
+        mkdir -p dist-debug
         cp "$LOG" dist-debug/ 2>/dev/null || true
-        bash /tmp/analyze-log.sh "$LOG" "${{ matrix.format }}" "${{ matrix.arch }}"
-
-        if [ "$RC" -ne 0 ]; then
-          echo "完整日志请下载 artifact: debug-log-${{ matrix.format }}-${{ matrix.arch }}"
-        fi
+        bash /tmp/analyze-log.sh "$LOG" "kernel" "${{ matrix.arch }}"
         exit "$RC"
 
+    - name: Stage kernel artifacts
+      id: stage
+      env:
+        DEBUG_VERBOSE: ${{ inputs.debug_verbose }}
+      run: |
+        set -euo pipefail
+        if [ "${DEBUG_VERBOSE}" = "true" ]; then set -x; fi
+        cd kernel-source
+        KARCH="${{ steps.arch.outputs.karch }}"
+        KIMAGE="${{ steps.arch.outputs.arch_boot }}"
+
+        KVER="$(make ARCH="$KARCH" -s kernelrelease)"
+        echo "Kernel release: $KVER"
+        [ -n "$KVER" ] || { echo "ERROR: empty KERNELRELEASE" >&2; exit 1; }
+
+        STAGE="$(mktemp -d)"
+        echo "STAGE=$STAGE" >> "$GITHUB_ENV"
+        echo "KVER=$KVER"   >> "$GITHUB_ENV"
+
+        mkdir -p "$STAGE/boot"
+        [ -f "$KIMAGE" ] || { echo "ERROR: image not found: $KIMAGE" >&2; exit 1; }
+        cp "$KIMAGE"   "$STAGE/boot/vmlinuz-${KVER}"
+        cp System.map  "$STAGE/boot/System.map-${KVER}"
+        cp .config     "$STAGE/boot/config-${KVER}"
+
+        make ARCH="$KARCH" modules_install INSTALL_MOD_PATH="$STAGE"
+        rm -f "$STAGE/lib/modules/${KVER}/build" "$STAGE/lib/modules/${KVER}/source"
+
+        echo ""
+        echo "──── STAGE layout ────"
+        find "$STAGE" -maxdepth 3 -type d | sort | head -30
+        echo "──── boot/ ────"
+        ls -la "$STAGE/boot"
+
+    - name: Package as deb
+      if: contains(matrix.formats, 'deb')
+      run: |
+        set -euo pipefail
+        DEB_ARCH="${{ steps.arch.outputs.deb_arch }}"
+        KVER="$KVER"
+
+        STAGE_DEB="$(mktemp -d)/linux-image-${KVER}"
+        mkdir -p "$STAGE_DEB/DEBIAN"
+
+        cp -a "$STAGE/boot" "$STAGE_DEB/"
+        cp -a "$STAGE/lib"  "$STAGE_DEB/"
+
+        cat > "$STAGE_DEB/DEBIAN/control" <<EOF
+        Package: linux-image-${KVER}
+        Version: ${KVER}-1
+        Section: kernel
+        Priority: optional
+        Architecture: ${DEB_ARCH}
+        Maintainer: CI <ci@example.com>
+        Description: Custom Linux kernel ${KVER}
+        EOF
+
+        cat > "$STAGE_DEB/DEBIAN/postinst" <<EOF
+        #!/bin/sh
+        set -e
+        if command -v depmod >/dev/null 2>&1; then
+            depmod ${KVER} || :
+        fi
+        EOF
+        chmod 755 "$STAGE_DEB/DEBIAN/postinst"
+
+        ( cd "$STAGE_DEB" && find . -type f ! -path './DEBIAN/*' -exec md5sum {} \; > DEBIAN/md5sums )
+
+        mkdir -p dist/deb
+        dpkg-deb --root-owner-group --build "$STAGE_DEB" \
+          "dist/deb/linux-image-${KVER}_${KVER}-1_${DEB_ARCH}.deb"
+
+        echo "──── deb contents ────"
+        dpkg-deb -c "dist/deb/linux-image-${KVER}_${KVER}-1_${DEB_ARCH}.deb" | head -30
+
+    - name: Package as rpm
+      if: contains(matrix.formats, 'rpm')
+      run: |
+        set -euo pipefail
+        RPM_ARCH="${{ steps.arch.outputs.rpm_arch }}"
+        KVER="$KVER"
+        RPM_VERSION="$(echo "$KVER" | tr '-' '.')"
+
+        RPM_DIR="$(mktemp -d)"
+        mkdir -p "$RPM_DIR"/{BUILD,RPMS,SOURCES,SPECS,BUILDROOT}
+
+        SPEC="$RPM_DIR/SPECS/linux-custom.spec"
+        cat > "$SPEC" <<EOF
+        Name:           linux-custom
+        Version:        ${RPM_VERSION}
+        Release:        1
+        Summary:        Custom Linux kernel ${KVER}
+        License:        GPL-2.0-only
+        AutoReqProv:    no
+        BuildArch:      ${RPM_ARCH}
+
+        %global __strip /bin/true
+        %global __os_install_post %{nil}
+
+        %description
+        Custom Linux kernel ${KVER}.
+
+        %install
+        mkdir -p %{buildroot}
+        cp -a ${STAGE}/. %{buildroot}/
+
+        %files
+        /boot/vmlinuz-*
+        /boot/System.map-*
+        /boot/config-*
+        /lib/modules/*
+
+        %post
+        /sbin/depmod ${KVER} >/dev/null 2>&1 || :
+        EOF
+
+        rpmbuild --define "_topdir $RPM_DIR" -bb "$SPEC"
+
+        mkdir -p dist/rpm
+        find "$RPM_DIR/RPMS" -name '*.rpm' -exec cp {} dist/rpm/ \;
+
+        echo "──── rpm artifacts ────"
+        ls -lh dist/rpm/
+
     - name: Prepare tarxz helper templates
-      if: matrix.format == 'tarxz'
+      if: contains(matrix.formats, 'tarxz')
       run: |
         mkdir -p /tmp/tarxz-helpers
 
@@ -549,120 +662,135 @@ jobs:
 
         ls -la /tmp/tarxz-helpers/
 
-    - name: Build kernel packages (tar.xz)
-      if: matrix.format == 'tarxz'
-      env:
-        DEBUG_VERBOSE: ${{ inputs.debug_verbose }}
+    - name: Package as tar.xz
+      if: contains(matrix.formats, 'tarxz')
       run: |
-        set -uo pipefail
-        [ "${DEBUG_VERBOSE}" = "true" ] && set -x
+        set -euo pipefail
+        ARCH="${{ matrix.arch }}"
+        KVER="$KVER"
 
-        LOG="/tmp/build-tarxz-${{ matrix.arch }}.log"
-        mkdir -p dist dist-debug
+        STAGE_PARENT="$(mktemp -d)"
+        PKG_DIR="linux-${KVER}-${ARCH}"
+        PKG_ROOT="$STAGE_PARENT/$PKG_DIR"
+        mkdir -p "$PKG_ROOT"
 
-        RC=0
-        {
-          set -e
-          cd kernel-source
+        cp -a "$STAGE/boot" "$PKG_ROOT/"
+        cp -a "$STAGE/lib"  "$PKG_ROOT/"
 
-          KARCH="${{ steps.arch.outputs.karch }}"
-          ARCH="${{ matrix.arch }}"
+        TPL_DIR=/tmp/tarxz-helpers
+        [ -d "$TPL_DIR" ] || { echo "FATAL: templates not found" >&2; exit 1; }
 
-          KVER="$(make ARCH="$KARCH" -s kernelrelease)"
-          echo "Kernel release: $KVER"
-          [ -n "$KVER" ] || { echo "ERROR: empty KERNELRELEASE" >&2; exit 1; }
+        sed "s/__KVER__/${KVER}/g" "$TPL_DIR/install.sh.tpl"   > "$PKG_ROOT/install-${KVER}.sh"
+        sed "s/__KVER__/${KVER}/g" "$TPL_DIR/uninstall.sh.tpl" > "$PKG_ROOT/uninstall-${KVER}.sh"
+        sed -e "s/__KVER__/${KVER}/g" -e "s/__ARCH__/${ARCH}/g" \
+          "$TPL_DIR/README.md.tpl" > "$PKG_ROOT/README.md"
 
-          echo ""
-          echo "════════ make tarxz-pkg ════════"
-          make ARCH="$KARCH" tarxz-pkg -j$(nproc)
+        chmod 755 "$PKG_ROOT/install-${KVER}.sh" "$PKG_ROOT/uninstall-${KVER}.sh"
 
-          TARBALL="linux-${KVER}.tar.xz"
-          [ -f "$TARBALL" ] || { echo "ERROR: tarball not found: $TARBALL" >&2; exit 1; }
+        mkdir -p dist/tarxz
+        OUTNAME="linux-${KVER}-${ARCH}.tar.xz"
+        ( cd "$STAGE_PARENT" && tar --owner=0 --group=0 -cJf "$OLDPWD/dist/tarxz/$OUTNAME" "$PKG_DIR" )
 
-          STAGE_PARENT="$(mktemp -d)"
-          PKG_DIR="linux-${KVER}-${ARCH}"
-          STAGE="$STAGE_PARENT/$PKG_DIR"
-          mkdir -p "$STAGE"
-          tar -xJf "$TARBALL" -C "$STAGE"
+        echo "──── tar.xz contents (top 20) ────"
+        tar -tJf "dist/tarxz/$OUTNAME" | head -20
+        ls -lh "dist/tarxz/$OUTNAME"
 
-          echo ""
-          echo "──── package content preview ────"
-          ls -la "$STAGE"
+    - name: Package as pkg.tar.zst
+      if: contains(matrix.formats, 'pkg')
+      run: |
+        set -euo pipefail
+        ARCH="${{ matrix.arch }}"
+        KVER="$KVER"
 
-          TPL_DIR=/tmp/tarxz-helpers
-          [ -d "$TPL_DIR" ] || { echo "FATAL: templates not found" >&2; exit 1; }
+        PKG_ROOT="$(mktemp -d)"
 
-          sed "s/__KVER__/${KVER}/g" "$TPL_DIR/install.sh.tpl" > "$STAGE/install-${KVER}.sh"
-          chmod 755 "$STAGE/install-${KVER}.sh"
+        cp -a "$STAGE/boot" "$PKG_ROOT/"
+        cp -a "$STAGE/lib"  "$PKG_ROOT/"
 
-          sed "s/__KVER__/${KVER}/g" "$TPL_DIR/uninstall.sh.tpl" > "$STAGE/uninstall-${KVER}.sh"
-          chmod 755 "$STAGE/uninstall-${KVER}.sh"
+        cat > "$PKG_ROOT/.PKGINFO" <<EOF
+        pkgname = linux-custom
+        pkgbase = linux-custom
+        pkgver = ${KVER}-1
+        pkgdesc = Custom Linux kernel ${KVER}
+        url = https://kernel.org
+        builddate = $(date +%s)
+        packager = CI <ci@example.com>
+        size = $(du -sb "$PKG_ROOT" | cut -f1)
+        arch = ${ARCH}
+        license = GPL-2.0-only
+        EOF
 
-          sed -e "s/__KVER__/${KVER}/g" -e "s/__ARCH__/${ARCH}/g" \
-            "$TPL_DIR/README.md.tpl" > "$STAGE/README.md"
+        cat > "$PKG_ROOT/.INSTALL" <<EOF
+        post_install() {
+            /sbin/depmod ${KVER} >/dev/null 2>&1 || :
+        }
+        post_upgrade() {
+            post_install
+        }
+        pre_remove() {
+            :
+        }
+        post_remove() {
+            :
+        }
+        EOF
 
-          mkdir -p dist
-          OUTNAME="linux-${KVER}-${ARCH}.tar.xz"
-          ( cd "$STAGE_PARENT" && tar -cJf "$OLDPWD/dist/$OUTNAME" "$PKG_DIR" )
-          rm -rf "$STAGE_PARENT"
+        mkdir -p dist/pkg
+        OUTNAME="linux-custom-${KVER}-1-${ARCH}.pkg.tar.zst"
+        ( cd "$PKG_ROOT" && tar --owner=0 --group=0 -cf - . \
+          | zstd -T0 -19 -o "$OLDPWD/dist/pkg/$OUTNAME" -f )
 
-          echo ""
-          echo "════════ tar.xz package ════════"
-          ls -lh "dist/$OUTNAME"
-          echo "──── content (top 20) ────"
-          tar -tJf "dist/$OUTNAME" | head -20
-          echo "──── end ────"
-
-          test -n "$(find dist -maxdepth 1 -name '*.tar.xz' -print -quit)"
-        } 2>&1 | tee "$LOG"
-        RC=${PIPESTATUS[0]}
-
-        cp "$LOG" dist-debug/ 2>/dev/null || true
-        bash /tmp/analyze-log.sh "$LOG" "${{ matrix.format }}" "${{ matrix.arch }}"
-
-        if [ "$RC" -ne 0 ]; then
-          echo ""
-          echo "──── partial artifacts in dist/ ────"
-          ls -lh dist/ || true
-          echo "完整日志请下载 artifact: debug-log-${{ matrix.format }}-${{ matrix.arch }}"
-        fi
-        exit "$RC"
+        echo "──── pkg.tar.zst contents (top 20) ────"
+        tar --zstd -tf "dist/pkg/$OUTNAME" | head -20
+        ls -lh "dist/pkg/$OUTNAME"
 
     - name: Collect artifacts
       if: always() && !cancelled()
       run: |
-        mkdir -p dist
-        case "${{ matrix.format }}" in
-          deb)
-            find kernel-source/.. -maxdepth 1 -type f -name 'linux-image-*.deb' \
-              ! -name '*-dbg_*.deb' -exec mv {} dist/ \; 2>/dev/null || true
-            find kernel-source/.. -maxdepth 1 -type f -name 'linux-headers-*.deb' \
-              -exec mv {} dist/ \; 2>/dev/null || true
-            ;;
-          rpm)
-            find kernel-source/rpmbuild/RPMS -type f -name '*.rpm' \
-              -exec mv {} dist/ \; 2>/dev/null || true
-            ;;
-          tarxz)
-            ;;
-        esac
-        echo "──── collected ────"
-        ls -lh dist/ || true
+        echo "──── dist tree ────"
+        find dist -type f 2>/dev/null || echo "(empty)"
 
-    - name: Upload kernel artifacts
-      if: always() && !cancelled() && hashFiles('dist/**') != ''
+    - name: Upload deb artifacts
+      if: always() && !cancelled() && contains(matrix.formats, 'deb') && hashFiles('dist/deb/**') != ''
       uses: actions/upload-artifact@v4
       with:
-        name: kernel-${{ matrix.format }}-${{ matrix.arch }}
-        path: dist/*
+        name: kernel-deb-${{ matrix.arch }}
+        path: dist/deb/*
         if-no-files-found: warn
         retention-days: 7
 
-    - name: Upload debug logs (all formats)
+    - name: Upload rpm artifacts
+      if: always() && !cancelled() && contains(matrix.formats, 'rpm') && hashFiles('dist/rpm/**') != ''
+      uses: actions/upload-artifact@v4
+      with:
+        name: kernel-rpm-${{ matrix.arch }}
+        path: dist/rpm/*
+        if-no-files-found: warn
+        retention-days: 7
+
+    - name: Upload tar.xz artifacts
+      if: always() && !cancelled() && contains(matrix.formats, 'tarxz') && hashFiles('dist/tarxz/**') != ''
+      uses: actions/upload-artifact@v4
+      with:
+        name: kernel-tarxz-${{ matrix.arch }}
+        path: dist/tarxz/*
+        if-no-files-found: warn
+        retention-days: 7
+
+    - name: Upload pkg.tar.zst artifacts
+      if: always() && !cancelled() && contains(matrix.formats, 'pkg') && hashFiles('dist/pkg/**') != ''
+      uses: actions/upload-artifact@v4
+      with:
+        name: kernel-pkg-${{ matrix.arch }}
+        path: dist/pkg/*
+        if-no-files-found: warn
+        retention-days: 7
+
+    - name: Upload debug logs
       if: always() && !cancelled() && hashFiles('dist-debug/**') != ''
       uses: actions/upload-artifact@v4
       with:
-        name: debug-log-${{ matrix.format }}-${{ matrix.arch }}
+        name: debug-log-${{ matrix.arch }}
         path: dist-debug/*
         if-no-files-found: warn
         retention-days: 7
