@@ -10,16 +10,35 @@ on:
       arm64_rpm:   { description: 'arm64   ›  rpm', type: boolean, default: false }
       arm64_pkg:   { description: 'arm64   ›  pkg.tar.zst（使用 Arch Linux ARM 容器）', type: boolean, default: false }
       config_choice:
-        description: '内核配置来源（5 种内核自带目标）'
+        description: '内核配置来源：内核自带目标 / 仓库 configs/* / 发行版'
         type: choice
         required: true
         default: 'default'
         options:
-          - 'default'         # make defconfig（架构默认）
-          - 'allyesconfig'    # 全部编进内核（包巨大，可能失败）
-          - 'allmodconfig'    # 尽量模块化（包巨大，可能失败）
-          - 'allnoconfig'     # 最小配置
-          - 'tinyconfig'      # 极小内核，用于快速验证
+          # ── 内核自带构建目标 ──
+          - 'default'                    # make defconfig（架构默认）
+          - 'allyesconfig'               # 全部编进内核（包巨大，可能失败）
+          - 'allmodconfig'               # 尽量模块化（包巨大，可能失败）
+          - 'allnoconfig'                # 最小配置
+          - 'tinyconfig'                 # 极小内核，用于快速验证
+          # ── 仓库内的 config ──
+          - 'configs/G40_45.config'
+          # ── 发行版 config ──
+          - 'alma'
+          - 'alpine'
+          - 'arch'
+          - 'centos'
+          - 'debian'
+          - 'fedora'
+          - 'gentoo'
+          - 'kali'
+          - 'manjaro'
+          - 'nixos'
+          - 'opensuse'
+          - 'rhel'
+          - 'rocky'
+          - 'ubuntu'
+          - 'void'
       config_custom:
         description: '（可选）自定义配置：仓库内路径 / http(s):// URL。填了则覆盖上面的选择'
         type: string
@@ -154,7 +173,7 @@ jobs:
         KARCH="${{ steps.arch.outputs.karch }}"
         CONFIG_OUT="/tmp/kernel.config"
 
-        # config_custom 优先
+        # config_custom 最高优先级
         [ -n "$CUSTOM" ] && CHOICE="$CUSTOM"
 
         if [[ "$CHOICE" == http://* ]] || [[ "$CHOICE" == https://* ]]; then
@@ -181,8 +200,28 @@ jobs:
           echo "CONFIG_SOURCE=kernel built-in: $CHOICE" >> "$GITHUB_ENV"
 
         else
-          echo "ERROR: unknown config_choice: $CHOICE" >&2
-          exit 1
+          # 发行版 config 映射
+          case "$CHOICE" in
+            alma)     URL='https://git.almalinux.org/rpms/kernel/-/raw/c9/f/kernel-x86_64-fedora.config' ;;
+            alpine)   URL='https://gitlab.alpinelinux.org/alpine/aports/-/raw/master/main/linux-lts/config-lts.x86_64' ;;
+            arch)     URL='https://gitlab.archlinux.org/archlinux/packaging/packages/linux/-/raw/main/config' ;;
+            centos)   URL='https://gitlab.com/redhat/centos-stream/rpms/kernel/-/raw/c9s/f/kernel-x86_64-fedora.config' ;;
+            debian)   URL='https://salsa.debian.org/kernel-team/linux/-/raw/debian/latest/debian/config/config' ;;
+            fedora)   URL='https://src.fedoraproject.org/rpms/kernel/raw/rawhide/f/kernel-x86_64-fedora.config' ;;
+            gentoo)   URL='https://gitweb.gentoo.org/proj/gentoo-kernel.git/plain/default_config' ;;
+            kali)     URL='https://gitlab.com/kalilinux/packages/linux/-/raw/kali/master/debian/config/config' ;;
+            manjaro)  URL='https://gitlab.manjaro.org/packages/core/linux/-/raw/master/config' ;;
+            nixos)    URL='https://raw.githubusercontent.com/NixOS/nixpkgs/master/pkgs/os-specific/linux/kernel/common-config.nix' ;;
+            opensuse) URL='https://raw.githubusercontent.com/openSUSE/kernel-source/master/config/x86_64/default' ;;
+            rhel)     URL='https://gitlab.com/redhat/centos-stream/rpms/kernel/-/raw/c9s/f/kernel-x86_64-fedora.config' ;;
+            rocky)    URL='https://git.rockylinux.org/rocky/kernel/-/raw/r9/f/kernel-x86_64-fedora.config' ;;
+            ubuntu)   URL='https://git.launchpad.net/~ubuntu-kernel/ubuntu/+source/linux/+git/jammy/plain/debian.master/config/amd64/config.flavour.generic' ;;
+            void)     URL='https://raw.githubusercontent.com/void-linux/void-packages/master/srcpkgs/linux/files/x86_64-dotconfig' ;;
+            *) echo "Unknown config_choice: $CHOICE" >&2; exit 1 ;;
+          esac
+          echo "==> Source: distro '$CHOICE' -> $URL"
+          curl -fSL "$URL" -o "$CONFIG_OUT" || { echo "ERROR: download $URL failed" >&2; exit 1; }
+          echo "CONFIG_SOURCE=$CHOICE ($URL)" >> "$GITHUB_ENV"
         fi
 
         [ -s "$CONFIG_OUT" ] || { echo "ERROR: empty config" >&2; exit 1; }
