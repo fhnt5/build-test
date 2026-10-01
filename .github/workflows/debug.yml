@@ -10,7 +10,7 @@ on:
       arm64_rpm:   { description: 'arm64   ›  rpm', type: boolean, default: false }
       arm64_pkg:   { description: 'arm64   ›  pkg.tar.zst（使用 Arch Linux ARM 容器）', type: boolean, default: false }
       config_choice:
-        description: '内核配置来源：default = 内核 defconfig；all*config/tinyconfig = 内核自带构建目标；configs/* = 仓库文件；其他 = 发行版'
+        description: '内核配置来源（5 种内核自带目标）'
         type: choice
         required: true
         default: 'default'
@@ -20,22 +20,6 @@ on:
           - 'allmodconfig'
           - 'allnoconfig'
           - 'tinyconfig'
-          - 'configs/G40_45.config'
-          - 'alma'
-          - 'alpine'
-          - 'arch'
-          - 'centos'
-          - 'debian'
-          - 'fedora'
-          - 'gentoo'
-          - 'kali'
-          - 'manjaro'
-          - 'nixos'
-          - 'opensuse'
-          - 'rhel'
-          - 'rocky'
-          - 'ubuntu'
-          - 'void'
       config_custom:
         description: '（可选）自定义配置：仓库内路径 / http(s):// URL。填了则覆盖上面的选择'
         type: string
@@ -249,26 +233,11 @@ jobs:
         CUSTOM="${{ inputs.config_custom }}"
         KARCH="${{ steps.arch.outputs.karch }}"
         CONFIG_OUT="/tmp/kernel.config"
+
         [ -n "$CUSTOM" ] && CHOICE="$CUSTOM"
 
-        if [ -z "$CHOICE" ] || [ "$CHOICE" = "default" ]; then
-          echo "==> Source: kernel defconfig (make defconfig)"
-          cd kernel-source
-          make ARCH="$KARCH" defconfig
-          cp .config "$CONFIG_OUT"
-          cd ..
-          echo "CONFIG_SOURCE=kernel defconfig" >> "$GITHUB_ENV"
-
-        elif [[ "$CHOICE" =~ ^(allyesconfig|allmodconfig|allnoconfig|tinyconfig)$ ]]; then
-          echo "==> Source: kernel built-in make target: make $CHOICE"
-          cd kernel-source
-          make ARCH="$KARCH" "$CHOICE"
-          cp .config "$CONFIG_OUT"
-          cd ..
-          echo "CONFIG_SOURCE=kernel built-in: $CHOICE" >> "$GITHUB_ENV"
-
-        elif [[ "$CHOICE" == http://* ]] || [[ "$CHOICE" == https://* ]]; then
-          echo "==> Source: download from URL: $CHOICE"
+        if [[ "$CHOICE" == http://* ]] || [[ "$CHOICE" == https://* ]]; then
+          echo "==> Source: URL: $CHOICE"
           curl -fSL "$CHOICE" -o "$CONFIG_OUT"
           echo "CONFIG_SOURCE=$CHOICE" >> "$GITHUB_ENV"
 
@@ -282,32 +251,22 @@ jobs:
           cp "configs/$CHOICE" "$CONFIG_OUT"
           echo "CONFIG_SOURCE=configs/$CHOICE" >> "$GITHUB_ENV"
 
+        elif [[ "$CHOICE" =~ ^(default|allyesconfig|allmodconfig|allnoconfig|tinyconfig)$ ]]; then
+          echo "==> Source: kernel built-in target: make $CHOICE"
+          cd kernel-source
+          make ARCH="$KARCH" "$CHOICE"
+          cp .config "$CONFIG_OUT"
+          cd ..
+          echo "CONFIG_SOURCE=kernel built-in: $CHOICE" >> "$GITHUB_ENV"
+
         else
-          case "$CHOICE" in
-            alma)     URL='https://git.almalinux.org/rpms/kernel/-/raw/c9/f/kernel-x86_64-fedora.config' ;;
-            alpine)   URL='https://gitlab.alpinelinux.org/alpine/aports/-/raw/master/main/linux-lts/config-lts.x86_64' ;;
-            arch)     URL='https://gitlab.archlinux.org/archlinux/packaging/packages/linux/-/raw/main/config' ;;
-            centos)   URL='https://gitlab.com/redhat/centos-stream/rpms/kernel/-/raw/c9s/f/kernel-x86_64-fedora.config' ;;
-            debian)   URL='https://salsa.debian.org/kernel-team/linux/-/raw/debian/latest/debian/config/config' ;;
-            fedora)   URL='https://src.fedoraproject.org/rpms/kernel/raw/rawhide/f/kernel-x86_64-fedora.config' ;;
-            gentoo)   URL='https://gitweb.gentoo.org/proj/gentoo-kernel.git/plain/default_config' ;;
-            kali)     URL='https://gitlab.com/kalilinux/packages/linux/-/raw/kali/master/debian/config/config' ;;
-            manjaro)  URL='https://gitlab.manjaro.org/packages/core/linux/-/raw/master/config' ;;
-            nixos)    URL='https://raw.githubusercontent.com/NixOS/nixpkgs/master/pkgs/os-specific/linux/kernel/common-config.nix' ;;
-            opensuse) URL='https://raw.githubusercontent.com/openSUSE/kernel-source/master/config/x86_64/default' ;;
-            rhel)     URL='https://gitlab.com/redhat/centos-stream/rpms/kernel/-/raw/c9s/f/kernel-x86_64-fedora.config' ;;
-            rocky)    URL='https://git.rockylinux.org/rocky/kernel/-/raw/r9/f/kernel-x86_64-fedora.config' ;;
-            ubuntu)   URL='https://git.launchpad.net/~ubuntu-kernel/ubuntu/+source/linux/+git/jammy/plain/debian.master/config/amd64/config.flavour.generic' ;;
-            void)     URL='https://raw.githubusercontent.com/void-linux/void-packages/master/srcpkgs/linux/files/x86_64-dotconfig' ;;
-            *) echo "Unknown config_choice: $CHOICE" >&2; exit 1 ;;
-          esac
-          echo "==> Source: distro '$CHOICE' -> $URL"
-          curl -fSL "$URL" -o "$CONFIG_OUT" || { echo "ERROR: download $URL failed" >&2; exit 1; }
-          echo "CONFIG_SOURCE=$CHOICE ($URL)" >> "$GITHUB_ENV"
+          echo "ERROR: unknown config_choice: $CHOICE" >&2
+          exit 1
         fi
 
         [ -s "$CONFIG_OUT" ] || { echo "ERROR: empty config" >&2; exit 1; }
         echo "config lines: $(wc -l < "$CONFIG_OUT")"
+
         cd kernel-source
         cp "$CONFIG_OUT" .config
         make ARCH="$KARCH" olddefconfig
@@ -517,7 +476,7 @@ jobs:
         echo ""
         echo "════════════ Verifying kconfig after syncconfig ════════════"
         if ! check_kconfig "$SRC_DIR/.config"; then
-          echo "FATAL: BTF config was stripped by syncconfig (dependency missing in 7.2.8)" >&2
+          echo "FATAL: BTF config was stripped by syncconfig" >&2
           grep -nE 'DEBUG_INFO|BTF|RANDSTRUCT|WERROR|ORPHAN' "$SRC_DIR/.config" >&2
           exit 1
         fi
@@ -592,8 +551,9 @@ jobs:
         mkdir -p dist dist-debug
         find "$STAGE/out" -maxdepth 1 -type f -name '*.pkg.tar.zst' -exec mv {} dist/ \;
         cp "$LOG" dist-debug/ 2>/dev/null || true
-        [ -f "$STAGE/out/makepkg-build.log" ] && \
+        if [ -f "$STAGE/out/makepkg-build.log" ]; then
           cp "$STAGE/out/makepkg-build.log" dist-debug/ 2>/dev/null || true
+        fi
 
         bash /tmp/analyze-log.sh "$LOG" "${{ matrix.format }}" "${{ matrix.arch }}"
         rm -rf "$STAGE"
@@ -644,6 +604,7 @@ jobs:
     - name: Upload debug logs (all formats)
       if: always() && !cancelled() && hashFiles('dist-debug/**') != ''
       uses: actions/upload-artifact@v4
+      with:
         name: debug-log-${{ matrix.format }}-${{ matrix.arch }}
         path: dist-debug/*
         if-no-files-found: warn
