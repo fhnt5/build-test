@@ -109,6 +109,13 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
+    - name: Show build target
+      run: |
+        echo "Arch:   ${{ matrix.arch }}"
+        echo "Format: ${{ matrix.format }}"
+        echo "Ref:    ${{ needs.resolve-ref.outputs.kernel_ref }}"
+        echo "Runner: ${{ runner.os }} / ${{ runner.arch }}"
+
     - name: Set arch variables
       id: arch
       run: |
@@ -123,6 +130,10 @@ jobs:
             echo "deb_arch=arm64" >> "$GITHUB_OUTPUT"
             echo "carch=aarch64"  >> "$GITHUB_OUTPUT"
             ;;
+          *)
+            echo "Unsupported arch" >&2
+            exit 1
+            ;;
         esac
 
     - name: Free up disk space
@@ -136,7 +147,8 @@ jobs:
         sudo apt-get install -y \
           build-essential libncurses-dev bison flex \
           libssl-dev libelf-dev libdw-dev elfutils \
-          bc dwarves zstd cpio rsync kmod git jq curl
+          bc dwarves zstd cpio rsync kmod \
+          git jq curl
         case "${{ matrix.format }}" in
           deb) sudo apt-get install -y debhelper fakeroot ;;
           rpm) sudo apt-get install -y rpm rpm2cpio cpio ;;
@@ -194,9 +206,6 @@ jobs:
         cp "$CONFIG_OUT" .config
         make ARCH="$KARCH" olddefconfig
 
-    # ══════════════════════════════════════════════════════════════════
-    # deb / rpm
-    # ══════════════════════════════════════════════════════════════════
     - name: Build kernel packages (deb / rpm)
       if: matrix.format != 'pkg.tar.zst'
       run: |
@@ -218,9 +227,6 @@ jobs:
             ;;
         esac
 
-    # ══════════════════════════════════════════════════════════════════
-    # pkg.tar.zst —— 两阶段 makepkg + BTF/WERROR 修复 + config 预创建
-    # ══════════════════════════════════════════════════════════════════
     - name: Build kernel packages (pkg.tar.zst)
       if: matrix.format == 'pkg.tar.zst'
       run: |
@@ -237,57 +243,51 @@ jobs:
         cp /tmp/kernel.config "$STAGE/kernel.config"
         chmod 644 "$STAGE/kernel.config"
 
-        # ─── root-part.sh ───
         cat > "$STAGE/root-part.sh" <<'ROOT_EOF'
         #!/bin/bash
         set -e
+
         sed -i "s/^#DisableSandbox/DisableSandbox/" /etc/pacman.conf
+
         pacman -Sy --noconfirm --needed --disable-sandbox \
           base-devel git libarchive jq bc rsync kmod inetutils \
           elfutils debugedit zstd pahole
+
         useradd -m builder 2>/dev/null || true
+
         cp /host-staging/kernel.config    /home/builder/kernel.config
         cp /host-staging/builder-part.sh  /home/builder/builder-part.sh
         chmod 644 /home/builder/kernel.config
         chmod 755 /home/builder/builder-part.sh
         chown -R builder:builder /home/builder/kernel.config /home/builder/builder-part.sh
+
         su - builder -s /bin/bash -c 'bash ~/builder-part.sh'
         ROOT_EOF
         chmod +x "$STAGE/root-part.sh"
 
-        # ─── builder-part.sh ───
         cat > "$STAGE/builder-part.sh" <<'BUILDER_EOF'
         #!/bin/bash
         set -uo pipefail
         cd "$HOME"
 
-        CARCH="${CARCH:-$(uname -m)}"
-        echo "Container CARCH=$CARCH"
-
-        BTF_ENABLE="CONFIG_DEBUG_KERNEL CONFIG_DEBUG_INFO CONFIG_DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT CONFIG_DEBUG_INFO_BTF CONFIG_DEBUG_INFO_BTF_MODULES"
-        BTF_DISABLE="CONFIG_DEBUG_INFO_NONE CONFIG_DEBUG_INFO_SPLIT CONFIG_DEBUG_INFO_REDUCED CONFIG_GCC_PLUGIN_RANDSTRUCT"
-        # 让警告不再升级为错误（否则新版工具链上任意警告都会让构建失败）
-        WERROR_DISABLE="CONFIG_WERROR CONFIG_LD_ORPHAN_WARN"
+        # BTF 依赖链 + 强制禁用 WERROR（避免内核里任何 warning 变成致命错误）
+        KCONF_ENABLE="CONFIG_DEBUG_KERNEL CONFIG_DEBUG_INFO CONFIG_DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT CONFIG_DEBUG_INFO_BTF CONFIG_DEBUG_INFO_BTF_MODULES"
+        KCONF_DISABLE="CONFIG_DEBUG_INFO_NONE CONFIG_DEBUG_INFO_SPLIT CONFIG_DEBUG_INFO_REDUCED CONFIG_GCC_PLUGIN_RANDSTRUCT CONFIG_WERROR CONFIG_LD_ORPHAN_WARN"
 
         fix_kconfig() {
           local f="$1"
-          for opt in $BTF_ENABLE; do
+          for opt in $KCONF_ENABLE; do
             sed -i "/^# ${opt} is not set/d" "$f"
             sed -i "/^${opt}=/d" "$f"
             echo "${opt}=y" >> "$f"
           done
-          for opt in $BTF_DISABLE; do
+          for opt in $KCONF_DISABLE; do
             sed -i "/^${opt}=/d" "$f"
             sed -i "/^# ${opt} is not set/d" "$f"
             echo "# ${opt} is not set" >> "$f"
           done
-          for opt in $WERROR_DISABLE; do
-            sed -i "/^${opt}=/d" "$f"
-            sed -i "/^# ${opt} is not set/d" "$f"
-            echo "# ${opt} is not set" >> "$f"
-          done
-          # LD_ORPHAN_WARN_LEVEL 是字符串，强制为 warn
-          sed -i "/^CONFIG_LD_ORPHAN_WARN_LEVEL=/d" "$f"
+          # 内核孤儿节警告从 error 降级为 warn
+          sed -i '/^CONFIG_LD_ORPHAN_WARN_LEVEL=/d' "$f"
           echo 'CONFIG_LD_ORPHAN_WARN_LEVEL="warn"' >> "$f"
         }
 
@@ -296,7 +296,7 @@ jobs:
           for opt in CONFIG_DEBUG_KERNEL CONFIG_DEBUG_INFO CONFIG_DEBUG_INFO_BTF; do
             grep -q "^${opt}=y" "$f" || { echo "MISSING: ${opt}=y" >&2; fail=1; }
           done
-          for opt in $BTF_DISABLE $WERROR_DISABLE; do
+          for opt in $KCONF_DISABLE; do
             grep -q "^${opt}=y" "$f" && { echo "BAD: ${opt}=y" >&2; fail=1; }
           done
           grep -q '^CONFIG_LD_ORPHAN_WARN_LEVEL="error"' "$f" && { echo "BAD: LD_ORPHAN_WARN_LEVEL=error" >&2; fail=1; }
@@ -310,21 +310,21 @@ jobs:
 
         sed -i "s/^pkgbase=.*/pkgbase=linux-custom/" PKGBUILD
 
-        # ── 预创建所有可能的 config 文件名，防止 PKGBUILD 引用不到 ──
+        # 预创建所有可能的 config 文件名，防止 PKGBUILD 引用不到
         mkdir -p src
-        for name in config config.x86_64 config.aarch64 config.arm64 "config.${CARCH}"; do
+        CARCH_LOCAL="${CARCH:-$(uname -m)}"
+        for name in config config.x86_64 config.aarch64 config.arm64 "config.${CARCH_LOCAL}"; do
           cp ~/kernel.config "src/$name"
         done
         cp ~/kernel.config config
 
-        # ── 更宽松的 PKGBUILD config 引用替换 ──
-        # 匹配:  cp   [../]config.X    .config
-        #        cp   "${srcdir}/config.X"   .config
+        # 更宽松的 PKGBUILD config 引用替换
         sed -i -E "s|cp[[:space:]]+(\"?\\\$\{srcdir\}/)?\.?\.?/?config\.[^[:space:]\"]+[[:space:]]+\.config|cp /tmp/kernel.config .config|g" PKGBUILD
         sed -i -E "s|cp[[:space:]]+\"?\\\$\{srcdir\}/config\"?[[:space:]]+\.config|cp /tmp/kernel.config .config|g" PKGBUILD
 
         echo "──── PKGBUILD config references (after patch) ────"
         grep -nE '(^|[^a-zA-Z_])config([^a-zA-Z_]|$|\.)' PKGBUILD | head -30 || true
+        echo "──── end ────"
 
         echo ""
         echo "════════════ makepkg -o (prepare only) ════════════"
@@ -337,10 +337,9 @@ jobs:
         echo "SRC_DIR=$SRC_DIR"
         [ -n "$SRC_DIR" ] || { echo "FATAL: no source dir" >&2; exit 1; }
 
-        # prepare() 之后可能会用 PKGBUILD 里的 config，这里强制覆盖为我们的
+        # prepare() 之后强制覆盖 .config 为我们的
         cp ~/kernel.config "$SRC_DIR/.config"
 
-        # 修复 BTF 和 WERROR
         fix_kconfig "$SRC_DIR/.config"
         if ! check_kconfig "$SRC_DIR/.config"; then
           echo "FATAL: kconfig check failed" >&2
@@ -348,15 +347,17 @@ jobs:
           exit 1
         fi
 
-        # pahole 兼容补丁
         PAHOLE_FLAGS="$SRC_DIR/scripts/pahole-flags.sh"
         if [ -f "$PAHOLE_FLAGS" ] && ! grep -q 'skip_encoding_btf_enum64' "$PAHOLE_FLAGS"; then
           printf '\nif [ "${pahole_ver}" -ge "124" ]; then\n  extra_paholeopt="${extra_paholeopt} --skip_encoding_btf_enum64"\nfi\n' >> "$PAHOLE_FLAGS"
         fi
 
+        # ── 注意：makepkg 没有 --keep 长选项；-k 等价于保留构建目录 ──
+        # 这里显式不用 -k，失败时 makepkg 默认保留 srcdir，不影响诊断；
+        # 成功后清理也没关系，因为我们只需要 dist 里的 .pkg.tar.zst。
         echo ""
         echo "════════════ makepkg -e (build only) ════════════"
-        makepkg -e --noconfirm --nodeps --ignorearch --skipinteg --keep
+        makepkg -e --noconfirm --nodeps --ignorearch --skipinteg
         BUILD_RC=$?
         echo "makepkg -e exit code: $BUILD_RC"
         exit $BUILD_RC
