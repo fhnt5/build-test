@@ -321,8 +321,10 @@ jobs:
 
         echo ""
         echo "════════ .config summary ════════"
-        echo "config lines after processing: $(wc -l < .config)"
-        echo "════════ end ════════"
+        echo "config lines final : $(wc -l < .config)"
+        echo "modules (=m)       : $(grep -c '=m$' .config || true)"
+        echo "built-ins (=y)     : $(grep -c '=y$' .config || true)"
+        echo "════════ end ══════"
 
     - name: Compile kernel
       run: |
@@ -357,11 +359,8 @@ jobs:
         rm -f "$STAGE/lib/modules/${KVER}/build" "$STAGE/lib/modules/${KVER}/source"
 
         echo ""
-        echo "──── STAGE layout ────"
-        find "$STAGE" -maxdepth 3 -type d | sort > /tmp/stage-list.txt 2>&1 || true
-        head -30 /tmp/stage-list.txt || true
-        echo "──── boot/ ────"
-        ls -la "$STAGE/boot"
+        echo "──── image package breakdown ────"
+        du -sh "$STAGE/boot" "$STAGE/lib/modules" 2>/dev/null || true
 
     - name: Stage headers
       id: headers
@@ -377,18 +376,40 @@ jobs:
         HDR_DIR="$HDR_STAGE/usr/src/linux-headers-${KVER}"
         mkdir -p "$HDR_DIR"
 
-        echo "==> Copying headers ..."
-        cp -a include "$HDR_DIR/"
-        cp -a scripts "$HDR_DIR/"
-        cp Makefile .config "$HDR_DIR/"
-        [ -d arch ] && cp -a arch "$HDR_DIR/"
+        echo "==> Copying headers (current arch only) ..."
 
-        find . -name '*.h' -path './include/*' -exec cp --parents {} "$HDR_DIR/" \;
-        find . -name '*.h' -path './arch/*/include/*' -exec cp --parents {} "$HDR_DIR/" \;
+        # 1) include/ — 外部模块编译必需，不可精简
+        cp -a include "$HDR_DIR/"
+
+        # 2) scripts/ — 只保留构建外部模块真正需要的子集
+        #    basic/fixdep : make modules_prepare 依赖
+        #    mod/         : 模块版本签名、modpost
+        #    package/     : 部分 out-of-tree 模块引用
+        #    recordmk/    : 记录 Makefile 变更
+        #    kernel/      : 内核构建辅助
+        #    Makefile     : scripts 的构建入口
+        mkdir -p "$HDR_DIR/scripts"
+        for item in basic mod package recordmk kernel Makefile; do
+          [ -e "scripts/$item" ] && cp -a "scripts/$item" "$HDR_DIR/scripts/"
+        done
+
+        # 3) arch/ — 只保留当前架构（避免 20+ 架构浪费 10-20MB）
+        mkdir -p "$HDR_DIR/arch"
+        cp -a "arch/$KARCH" "$HDR_DIR/arch/"
+
+        # 4) 构建必需文件
+        cp Makefile .config "$HDR_DIR/"
+        [ -f Module.symvers ] && cp Module.symvers "$HDR_DIR/"
+        [ -f Kbuild ] && cp Kbuild "$HDR_DIR/"
 
         echo "──── headers size ────"
         du -sh "$HDR_DIR"
+        echo "──── headers breakdown ────"
+        for d in include scripts arch; do
+          [ -d "$HDR_DIR/$d" ] && du -sh "$HDR_DIR/$d" || true
+        done
 
+    # ==================== deb：image + headers ====================
     - name: Package as deb
       if: contains(matrix.formats, 'deb')
       run: |
@@ -398,17 +419,15 @@ jobs:
 
         mkdir -p dist/deb
 
-        # ===== linux-image =====
+        # ---------- linux-image ----------
         IMG_DIR="$(mktemp -d)/linux-image-${KVER}"
-        mkdir -p "$IMG_DIR/DEBIAN"
-        mkdir -p "$IMG_DIR/boot" "$IMG_DIR/lib/modules"
+        mkdir -p "$IMG_DIR/DEBIAN" "$IMG_DIR/boot" "$IMG_DIR/lib/modules"
 
-        # vmlinuz: 精确拷贝，找不到时 fallback glob
         if [ -f "$STAGE/boot/vmlinuz-${KVER}" ]; then
           cp "$STAGE/boot/vmlinuz-${KVER}" "$IMG_DIR/boot/vmlinuz-${KVER}"
         else
-          echo "WARNING: vmlinuz-${KVER} not found, trying glob..."
-          cp "$STAGE/boot/"vmlinuz* "$IMG_DIR/boot/vmlinuz-${KVER}" 2>/dev/null || { echo "ERROR: no vmlinuz found" >&2; exit 1; }
+          cp "$STAGE/boot/"vmlinuz* "$IMG_DIR/boot/vmlinuz-${KVER}" 2>/dev/null || \
+            { echo "ERROR: vmlinuz not found" >&2; exit 1; }
         fi
         cp "$STAGE/boot/System.map-${KVER}" "$IMG_DIR/boot/"
         cp "$STAGE/boot/config-${KVER}"     "$IMG_DIR/boot/"
@@ -424,32 +443,30 @@ jobs:
         Description: Custom Linux kernel ${KVER} (image + modules)
         EOF
 
-        cat > "$IMG_DIR/DEBIAN/postinst" <<POSTINST_EOF
+        cat > "$IMG_DIR/DEBIAN/postinst" <<'POSTINST_EOF'
         #!/bin/sh
         set -e
-        KVER_FULL="\$(basename "\$0" | sed 's/linux-image-//;s/\.postinst//')"
-        if [ -d "/lib/modules/\${KVER_FULL}" ] && command -v depmod >/dev/null 2>&1; then
-            depmod "\${KVER_FULL}" || echo "WARNING: depmod failed for \${KVER_FULL}" >&2
+        KVER_FULL="$(basename "$0" | sed 's/^linux-image-//;s/\.postinst$//')"
+        if [ -d "/lib/modules/${KVER_FULL}" ] && command -v depmod >/dev/null 2>&1; then
+            depmod "${KVER_FULL}" || echo "WARNING: depmod failed for ${KVER_FULL}" >&2
         fi
         POSTINST_EOF
         chmod 755 "$IMG_DIR/DEBIAN/postinst"
 
-        # md5sums: cd 后用相对路径，不用 sed 砍前缀
         ( cd "$IMG_DIR" && find boot lib -type f 2>/dev/null | sort | \
           while read -r f; do md5sum "$f"; done > DEBIAN/md5sums )
 
         dpkg-deb --root-owner-group --build "$IMG_DIR" \
           "dist/deb/linux-image-${KVER}_${DEB_ARCH}.deb"
 
-        # ===== linux-headers =====
-        HDR_DIR="$(mktemp -d)/linux-headers-${KVER}"
-        mkdir -p "$HDR_DIR/DEBIAN"
-        mkdir -p "$HDR_DIR/usr/src/linux-headers-${KVER}"
-
+        # ---------- linux-headers ----------
+        HDR_DIR_DEB="$(mktemp -d)/linux-headers-${KVER}"
+        mkdir -p "$HDR_DIR_DEB/DEBIAN"
+        mkdir -p "$HDR_DIR_DEB/usr/src/linux-headers-${KVER}"
         cp -a "$HDR_STAGE/usr/src/linux-headers-${KVER}/." \
-              "$HDR_DIR/usr/src/linux-headers-${KVER}/"
+              "$HDR_DIR_DEB/usr/src/linux-headers-${KVER}/"
 
-        cat > "$HDR_DIR/DEBIAN/control" <<EOF
+        cat > "$HDR_DIR_DEB/DEBIAN/control" <<EOF
         Package: linux-headers-${KVER}
         Version: 1
         Section: kernel
@@ -459,15 +476,16 @@ jobs:
         Description: Linux kernel headers for ${KVER}
         EOF
 
-        ( cd "$HDR_DIR" && find usr -type f 2>/dev/null | sort | \
+        ( cd "$HDR_DIR_DEB" && find usr -type f 2>/dev/null | sort | \
           while read -r f; do md5sum "$f"; done > DEBIAN/md5sums )
 
-        dpkg-deb --root-owner-group --build "$HDR_DIR" \
+        dpkg-deb --root-owner-group --build "$HDR_DIR_DEB" \
           "dist/deb/linux-headers-${KVER}_${DEB_ARCH}.deb"
 
         echo "──── deb packages ────"
         ls -lh dist/deb/
 
+    # ==================== rpm：image + headers ====================
     - name: Package as rpm
       if: contains(matrix.formats, 'rpm')
       run: |
@@ -475,6 +493,7 @@ jobs:
         RPM_ARCH="${{ steps.arch.outputs.rpm_arch }}"
         KVER="$KVER"
         # RPM Version 不允许 '-'，把最后一个 '-' 拆成 Version / Release
+        # 例如 6.12.5-zen1 → Version=6.12.5, Release=zen1_1
         RPM_VER="$(echo "$KVER" | rev | cut -d'-' -f2- | rev)"
         RPM_REL="$(echo "$KVER" | rev | cut -d'-' -f1 | rev)_1"
         [ -z "$RPM_VER" ] && RPM_VER="$KVER"
@@ -483,7 +502,7 @@ jobs:
         RPM_DIR="$(mktemp -d)"
         mkdir -p "$RPM_DIR"/{BUILD,RPMS,SOURCES,SPECS,BUILDROOT}
 
-        # ===== kernel-image.spec =====
+        # ---------- kernel-image.spec ----------
         cat > "$RPM_DIR/SPECS/kernel-image.spec" <<EOF
         %global debug_package %{nil}
         %global __strip /bin/true
@@ -535,7 +554,7 @@ jobs:
         rm -rf /lib/modules/${KVER} 2>/dev/null || :
         EOF
 
-        # ===== kernel-headers.spec =====
+        # ---------- kernel-headers.spec ----------
         cat > "$RPM_DIR/SPECS/kernel-headers.spec" <<EOF
         %global debug_package %{nil}
         %global __strip /bin/true
@@ -576,6 +595,7 @@ jobs:
         echo "──── rpm artifacts ────"
         ls -lh dist/rpm/
 
+    # ==================== tar.xz：完整单包 + 安装/卸载脚本 ====================
     - name: Prepare tarxz helper templates
       if: contains(matrix.formats, 'tarxz')
       run: |
@@ -591,7 +611,7 @@ jobs:
             case "$arg" in -h|--help) echo "Usage: $0"; exit 0 ;; esac
         done
 
-        [ "$(id -u)" = "0" ] || { echo "ERROR: run as root"; exit 1; }
+        [ "$(id -u)" = "0" ] || { echo "ERROR: run as root" >&2; exit 1; }
         [ -d "$SCRIPT_DIR/boot" ] || { echo "ERROR: no boot/ in package" >&2; exit 1; }
 
         echo "==> Installing kernel ${KVER} ..."
@@ -654,8 +674,8 @@ jobs:
         if [ -f "$STAGE/boot/vmlinuz-${KVER}" ]; then
           cp "$STAGE/boot/vmlinuz-${KVER}" "$PKG_ROOT/boot/vmlinuz-${KVER}"
         else
-          echo "WARNING: vmlinuz-${KVER} not found, trying glob..."
-          cp "$STAGE/boot/"vmlinuz* "$PKG_ROOT/boot/vmlinuz-${KVER}" 2>/dev/null || { echo "ERROR: no vmlinuz found" >&2; exit 1; }
+          cp "$STAGE/boot/"vmlinuz* "$PKG_ROOT/boot/vmlinuz-${KVER}" 2>/dev/null || \
+            { echo "ERROR: vmlinuz not found" >&2; exit 1; }
         fi
         cp "$STAGE/boot/System.map-${KVER}" "$PKG_ROOT/boot/"
         cp "$STAGE/boot/config-${KVER}"     "$PKG_ROOT/boot/"
@@ -674,6 +694,7 @@ jobs:
         echo "──── tar.xz ────"
         ls -lh "dist/tarxz/linux-${KVER}-${ARCH}.tar.xz"
 
+    # ==================== pkg.tar.zst：image + headers ====================
     - name: Package as pkg.tar.zst
       if: contains(matrix.formats, 'pkg')
       run: |
@@ -681,14 +702,15 @@ jobs:
         ARCH="${{ matrix.arch }}"
         KVER="$KVER"
 
-        # ===== linux-image =====
+        # ---------- linux-image ----------
         IMG_ROOT="$(mktemp -d)"
         mkdir -p "$IMG_ROOT/boot" "$IMG_ROOT/lib/modules"
 
         if [ -f "$STAGE/boot/vmlinuz-${KVER}" ]; then
           cp "$STAGE/boot/vmlinuz-${KVER}" "$IMG_ROOT/boot/vmlinuz-${KVER}"
         else
-          cp "$STAGE/boot/"vmlinuz* "$IMG_ROOT/boot/vmlinuz-${KVER}" 2>/dev/null || { echo "ERROR: no vmlinuz found" >&2; exit 1; }
+          cp "$STAGE/boot/"vmlinuz* "$IMG_ROOT/boot/vmlinuz-${KVER}" 2>/dev/null || \
+            { echo "ERROR: vmlinuz not found" >&2; exit 1; }
         fi
         cp "$STAGE/boot/System.map-${KVER}" "$IMG_ROOT/boot/"
         cp "$STAGE/boot/config-${KVER}"     "$IMG_ROOT/boot/"
@@ -718,10 +740,9 @@ jobs:
         ( cd "$IMG_ROOT" && tar --owner=0 --group=0 --numeric-owner -cf - . \
           | zstd -T0 -19 -o "$OLDPWD/dist/pkg/linux-image-${KVER}-${ARCH}.pkg.tar.zst" -f )
 
-        # ===== linux-headers =====
+        # ---------- linux-headers ----------
         HDR_ROOT="$(mktemp -d)"
         mkdir -p "$HDR_ROOT/usr/src/linux-headers-${KVER}"
-
         cp -a "$HDR_STAGE/usr/src/linux-headers-${KVER}/." \
               "$HDR_ROOT/usr/src/linux-headers-${KVER}/"
 
