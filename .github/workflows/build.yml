@@ -15,15 +15,12 @@ on:
         required: true
         default: 'default'
         options:
-          # ── 内核自带构建目标 ──
-          - 'default'                    # make defconfig（架构默认）
-          - 'allyesconfig'               # 全部编进内核（包巨大，可能失败）
-          - 'allmodconfig'               # 尽量模块化（包巨大，可能失败）
-          - 'allnoconfig'                # 最小配置
-          - 'tinyconfig'                 # 极小内核，用于快速验证
-          # ── 仓库内的 config ──
+          - 'default'
+          - 'allyesconfig'
+          - 'allmodconfig'
+          - 'allnoconfig'
+          - 'tinyconfig'
           - 'configs/G40_45.config'
-          # ── 发行版 config ──
           - 'alma'
           - 'alpine'
           - 'arch'
@@ -173,7 +170,6 @@ jobs:
         KARCH="${{ steps.arch.outputs.karch }}"
         CONFIG_OUT="/tmp/kernel.config"
 
-        # config_custom 最高优先级
         [ -n "$CUSTOM" ] && CHOICE="$CUSTOM"
 
         if [[ "$CHOICE" == http://* ]] || [[ "$CHOICE" == https://* ]]; then
@@ -200,7 +196,6 @@ jobs:
           echo "CONFIG_SOURCE=kernel built-in: $CHOICE" >> "$GITHUB_ENV"
 
         else
-          # 发行版 config 映射
           case "$CHOICE" in
             alma)     URL='https://git.almalinux.org/rpms/kernel/-/raw/c9/f/kernel-x86_64-fedora.config' ;;
             alpine)   URL='https://gitlab.alpinelinux.org/alpine/aports/-/raw/master/main/linux-lts/config-lts.x86_64' ;;
@@ -278,7 +273,6 @@ jobs:
           base-devel git libarchive jq bc rsync kmod inetutils \
           elfutils debugedit zstd pahole
 
-        # 关掉 -Werror=format-security
         sed -i 's/-Werror=format-security/-Wno-error=format-security/g' /etc/makepkg.conf
         echo "---- makepkg.conf CFLAGS after patch ----"
         grep -E '^(CFLAGS|CXXFLAGS)=' /etc/makepkg.conf || true
@@ -301,8 +295,11 @@ jobs:
         set -uo pipefail
         cd "$HOME"
 
-        KCONF_ENABLE="CONFIG_DEBUG_KERNEL CONFIG_DEBUG_INFO CONFIG_DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT CONFIG_DEBUG_INFO_BTF CONFIG_DEBUG_INFO_BTF_MODULES"
+        # 关键：加上 CONFIG_EXPERT，tinyconfig 下 DEBUG_* 系的常见前置项
+        KCONF_ENABLE="CONFIG_DEBUG_KERNEL CONFIG_DEBUG_INFO CONFIG_DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT CONFIG_DEBUG_INFO_BTF CONFIG_DEBUG_INFO_BTF_MODULES CONFIG_EXPERT"
         KCONF_DISABLE="CONFIG_DEBUG_INFO_NONE CONFIG_DEBUG_INFO_SPLIT CONFIG_DEBUG_INFO_REDUCED CONFIG_GCC_PLUGIN_RANDSTRUCT CONFIG_WERROR CONFIG_LD_ORPHAN_WARN"
+        # grep 用：关注所有可能影响 BTF 的选项
+        KCONF_GREP='DEBUG_INFO|BTF|RANDSTRUCT|WERROR|ORPHAN_WARN|DEBUG_KERNEL|EXPERT|KALLSYMS'
 
         fix_kconfig() {
           local f="$1"
@@ -339,7 +336,6 @@ jobs:
 
         sed -i "s/^pkgbase=.*/pkgbase=linux-custom/" PKGBUILD
 
-        # 跳过 htmldocs
         sed -i 's/make htmldocs/: # htmldocs disabled/g' PKGBUILD
         echo "---- PKGBUILD htmldocs check ----"
         grep -q htmldocs PKGBUILD && { echo "WARN: htmldocs still present:"; grep -n htmldocs PKGBUILD; } || echo "OK: no htmldocs"
@@ -369,13 +365,20 @@ jobs:
         cp ~/kernel.config "$SRC_DIR/.config"
         fix_kconfig "$SRC_DIR/.config"
 
+        echo ""
+        echo "════════════ .config BEFORE syncconfig (BTF/DEBUG lines) ════════════"
+        grep -nE "$KCONF_GREP" "$SRC_DIR/.config" || echo "(no matches)"
+
         if ! check_kconfig "$SRC_DIR/.config"; then
-          echo "FATAL: kconfig check failed" >&2
-          grep -nE 'DEBUG_INFO|BTF|RANDSTRUCT|WERROR|ORPHAN' "$SRC_DIR/.config" >&2
+          echo "FATAL: kconfig check failed BEFORE syncconfig" >&2
+          grep -nE "$KCONF_GREP" "$SRC_DIR/.config" >&2
           exit 1
         fi
+        echo "kconfig OK before syncconfig."
 
-        # 手动 syncconfig
+        # 存档 syncconfig 之前的配置
+        grep -E "$KCONF_GREP" "$SRC_DIR/.config" | sort > /tmp/kconfig-before.txt
+
         case "$(uname -m)" in
           x86_64|amd64) KARCH_SYNC="x86_64" ;;
           aarch64|arm64) KARCH_SYNC="arm64" ;;
@@ -385,11 +388,23 @@ jobs:
         echo "════════════ make syncconfig ════════════"
         (cd "$SRC_DIR" && make ARCH="$KARCH_SYNC" syncconfig >/dev/null 2>&1) \
           || echo "WARN: syncconfig returned non-zero"
+
+        # 存档 syncconfig 之后的配置
+        grep -E "$KCONF_GREP" "$SRC_DIR/.config" | sort > /tmp/kconfig-after.txt
+
+        echo ""
+        echo "════════════ DIFF: syncconfig BEFORE vs AFTER ════════════"
+        if diff /tmp/kconfig-before.txt /tmp/kconfig-after.txt; then
+          echo "(no differences)"
+        fi
+        echo "════════════ end diff ════════════"
+
         echo ""
         echo "════════════ Verifying kconfig after syncconfig ════════════"
         if ! check_kconfig "$SRC_DIR/.config"; then
           echo "FATAL: BTF config was stripped by syncconfig" >&2
-          grep -nE 'DEBUG_INFO|BTF|RANDSTRUCT|WERROR|ORPHAN' "$SRC_DIR/.config" >&2
+          echo "---- full BTF/DEBUG/EXPERT/KALLSYMS dump after syncconfig ----" >&2
+          grep -nE "$KCONF_GREP" "$SRC_DIR/.config" >&2
           exit 1
         fi
         echo "kconfig still OK after syncconfig."
@@ -403,7 +418,7 @@ jobs:
         echo ""
         echo "════════════ CONTAINER-SIDE DIAGNOSTICS ════════════"
         echo "[1] .config BTF/WERROR lines:"
-        grep -nE 'DEBUG_INFO|BTF|RANDSTRUCT|WERROR|ORPHAN' "$SRC_DIR/.config" || echo "(none)"
+        grep -nE "$KCONF_GREP" "$SRC_DIR/.config" || echo "(none)"
         echo ""
         echo "[2] vmlinux files:"
         ls -la "$SRC_DIR"/vmlinux* 2>/dev/null || echo "(no vmlinux files)"
