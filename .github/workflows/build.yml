@@ -1,176 +1,3 @@
-name: Build Kernel
-
-on:
-  workflow_dispatch:
-    inputs:
-      x86_64_deb:
-        description: '构建 x86_64 deb 包'
-        type: boolean
-        default: true
-      x86_64_rpm:
-        description: '构建 x86_64 rpm 包'
-        type: boolean
-        default: false
-      x86_64_tarxz:
-        description: '构建 x86_64 tar.xz 通用包'
-        type: boolean
-        default: false
-      x86_64_pkg:
-        description: '构建 x86_64 pkg.tar.zst（Arch 风格）'
-        type: boolean
-        default: false
-      arm64_deb:
-        description: '构建 arm64 deb 包'
-        type: boolean
-        default: false
-      arm64_rpm:
-        description: '构建 arm64 rpm 包'
-        type: boolean
-        default: false
-      arm64_tarxz:
-        description: '构建 arm64 tar.xz 通用包'
-        type: boolean
-        default: false
-      arm64_pkg:
-        description: '构建 arm64 pkg.tar.zst（Arch 风格）'
-        type: boolean
-        default: false
-      config_choice:
-        description: '内核配置预设'
-        type: choice
-        default: 'default'
-        options:
-          - 'default'
-          - 'allyesconfig'
-          - 'allmodconfig'
-          - 'allnoconfig'
-          - 'tinyconfig'
-          - 'configs/G40_45.config'
-          - 'alma'
-          - 'alpine'
-          - 'arch'
-          - 'centos'
-          - 'debian'
-          - 'fedora'
-          - 'gentoo'
-          - 'kali'
-          - 'manjaro'
-          - 'nixos'
-          - 'opensuse'
-          - 'rhel'
-          - 'rocky'
-          - 'ubuntu'
-          - 'void'
-      config_custom:
-        description: '自定义配置：本地路径或 http(s) URL'
-        type: string
-        default: ''
-      respect_config:
-        description: '严格模式：原样使用 .config，跳过修补与 olddefconfig'
-        type: boolean
-        default: true
-      include_headers:
-        description: '同时构建 headers 包（外挂模块编译必需）'
-        type: boolean
-        default: true
-      headers_full_tree:
-        description: 'headers 拷贝完整源码树（false=仅最小子集）'
-        type: boolean
-        default: true
-      strip_modules:
-        description: '剥离模块调试符号（体积更小，不可调试模块）'
-        type: boolean
-        default: false
-      tarxz_include_headers:
-        description: 'tar.xz 内包含 headers 目录'
-        type: boolean
-        default: true
-      parallel_jobs:
-        description: '并行编译任务数'
-        type: choice
-        default: 'auto'
-        options:
-          - 'auto'
-          - '1'
-          - '2'
-          - '4'
-          - '8'
-          - '16'
-      ccache:
-        description: '启用 ccache 编译器缓存'
-        type: boolean
-        default: false
-      lto_mode:
-        description: 'LLVM 链接时优化'
-        type: choice
-        default: 'none'
-        options:
-          - 'none'
-          - 'full'
-          - 'thin'
-      tune_profile:
-        description: '调优预设（none=原版，与独立开关互斥时以预设为准）'
-        type: choice
-        default: 'none'
-        options:
-          - 'none'
-          - 'default'
-          - 'performance'
-          - 'lowlatency'
-          - 'minimal'
-          - 'debugoff'
-      kernel_repo:
-        description: '内核源码 git 仓库'
-        type: string
-        default: 'https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux-stable.git'
-      kernel_ref:
-        description: 'git 分支或标签（留空=自动检测最新稳定版）'
-        type: string
-        default: ''
-      release_tag:
-        description: 'Release 标签（留空=只上传制品不发布）'
-        type: string
-        default: ''
-
-permissions:
-  contents: write
-
-jobs:
-  prepare:
-    runs-on: ubuntu-latest
-    outputs:
-      matrix: ${{ steps.gen.outputs.matrix }}
-    steps:
-      - name: 生成构建矩阵
-        id: gen
-        run: |
-          set -uo pipefail
-          MATRIX='{"include":[]}'
-
-          X86="[]"
-          [ "${{ inputs.x86_64_deb }}" = "true" ]     && X86=$(echo "$X86" | jq -c '. + ["deb"]')
-          [ "${{ inputs.x86_64_rpm }}" = "true" ]     && X86=$(echo "$X86" | jq -c '. + ["rpm"]')
-          [ "${{ inputs.x86_64_tarxz }}" = "true" ]   && X86=$(echo "$X86" | jq -c '. + ["tarxz"]')
-          [ "${{ inputs.x86_64_pkg }}" = "true" ]     && X86=$(echo "$X86" | jq -c '. + ["pkg"]')
-          if [ "$(echo "$X86" | jq 'length')" -gt 0 ]; then
-            MATRIX=$(echo "$MATRIX" | jq -c --argjson f "$X86" '.include += [{"arch":"x86_64","formats":$f}]')
-          fi
-
-          ARM="[]"
-          [ "${{ inputs.arm64_deb }}" = "true" ]     && ARM=$(echo "$ARM" | jq -c '. + ["deb"]')
-          [ "${{ inputs.arm64_rpm }}" = "true" ]     && ARM=$(echo "$ARM" | jq -c '. + ["rpm"]')
-          [ "${{ inputs.arm64_tarxz }}" = "true" ]   && ARM=$(echo "$ARM" | jq -c '. + ["tarxz"]')
-          [ "${{ inputs.arm64_pkg }}" = "true" ]     && ARM=$(echo "$ARM" | jq -c '. + ["pkg"]')
-          if [ "$(echo "$ARM" | jq 'length')" -gt 0 ]; then
-            MATRIX=$(echo "$MATRIX" | jq -c --argjson f "$ARM" '.include += [{"arch":"arm64","formats":$f}]')
-          fi
-
-          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
-          if [ "$(echo "$MATRIX" | jq '.include | length')" -eq 0 ]; then
-            echo "未选择任何构建目标" >&2
-            exit 1
-          fi
-
   resolve-ref:
     runs-on: ubuntu-latest
     outputs:
@@ -179,7 +6,7 @@ jobs:
       - name: 解析内核版本引用
         id: resolve
         run: |
-          set -uo pipefail
+          set -euo pipefail
           INPUT_REF="${{ inputs.kernel_ref }}"
           REPO="${{ inputs.kernel_repo }}"
 
@@ -187,9 +14,32 @@ jobs:
             echo "kernel_ref=$INPUT_REF" >> "$GITHUB_OUTPUT"
             exit 0
           fi
+
+          # 一次性读入 git 输出，避免下游 head 关闭管道导致上游 SIGPIPE。
+          # set -o pipefail 下 sort 收到 SIGPIPE 会以非零码退出，表现为
+          #   sort: write failed: 'standard output': Broken pipe
+          #   sort: write error
+          # 进而让整个 step 失败。
+          RAW="$(git ls-remote --tags --refs "$REPO" 2>/dev/null || true)"
+
+          # 从 RAW 里按正则过滤出所有 tag，版本序排序，取最新一条。
+          # 关键：sort -o 直接写回文件，不经过管道，彻底规避 SIGPIPE。
+          pick_latest() {
+            local pat="$1" tmp
+            tmp="$(mktemp)"
+            printf '%s\n' "$RAW" \
+              | awk -F/ '{print $NF}' \
+              | grep -E "$pat" > "$tmp" || true
+            if [ -s "$tmp" ]; then
+              sort -Vr -o "$tmp" "$tmp"
+              head -1 "$tmp"
+            fi
+            rm -f "$tmp"
+          }
+
+          # 官方 stable 仓库：只认纯上游三段版本号
           if echo "$REPO" | grep -Eq '(^|/)linux-stable(\.git)?$'; then
-            TAG=$(git ls-remote --tags --refs "$REPO" 2>/dev/null \
-              | awk -F/ '{print $NF}' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -Vr | head -1)
+            TAG="$(pick_latest '^v[0-9]+\.[0-9]+\.[0-9]+$' || true)"
             if [ -n "$TAG" ]; then
               echo "kernel_ref=$TAG" >> "$GITHUB_OUTPUT"
               exit 0
@@ -197,67 +47,24 @@ jobs:
             echo "无法定位 stable 最新标签" >&2
             exit 1
           fi
+
+          # 通用仓库：允许 v6.12.5 / v6.12.5-zen1 / 6.12.5-xanmod1 / 6.12.5-1-cachyos
           PAT='^v?[0-9]+\.[0-9]+(\.[0-9]+)?(-[0-9A-Za-z._-]+)?$'
-          LATEST=$(git ls-remote --tags --refs --sort=-v:refname "$REPO" 2>/dev/null \
-            | awk -F/ '{print $NF}' | grep -E "$PAT" | head -1)
+          LATEST="$(pick_latest "$PAT" || true)"
+
+          # 兜底 1：没有符合模式的 tag（比如 Liquorix 只维护分支）→ 取默认分支
           if [ -z "$LATEST" ]; then
-            LATEST=$(git ls-remote --symref "$REPO" HEAD 2>/dev/null \
-              | awk '/^ref:/ {sub("refs/heads/","",$2); print $2; exit}')
+            LATEST="$(git ls-remote --symref "$REPO" HEAD 2>/dev/null \
+              | awk '/^ref:/ {sub("refs/heads/","",$2); print $2; exit}')"
           fi
+
+          # 兜底 2：HEAD 是 detached，直接拿 SHA
           if [ -z "$LATEST" ]; then
-            LATEST=$(git ls-remote "$REPO" HEAD 2>/dev/null | awk '{print $1; exit}')
+            LATEST="$(git ls-remote "$REPO" HEAD 2>/dev/null | awk '{print $1; exit}')"
           fi
+
           if [ -z "$LATEST" ]; then
             echo "无法解析版本引用: $REPO" >&2
             exit 1
           fi
           echo "kernel_ref=$LATEST" >> "$GITHUB_OUTPUT"
-
-  build:
-    needs: [prepare, resolve-ref]
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
-    uses: ./.github/workflows/build-core.yml
-    with:
-      arch: ${{ matrix.arch }}
-      formats: ${{ toJSON(matrix.formats) }}
-      config_choice: ${{ inputs.config_choice }}
-      config_custom: ${{ inputs.config_custom }}
-      respect_config: ${{ inputs.respect_config }}
-      include_headers: ${{ inputs.include_headers }}
-      headers_full_tree: ${{ inputs.headers_full_tree }}
-      strip_modules: ${{ inputs.strip_modules }}
-      tarxz_include_headers: ${{ inputs.tarxz_include_headers }}
-      parallel_jobs: ${{ inputs.parallel_jobs }}
-      ccache: ${{ inputs.ccache }}
-      lto_mode: ${{ inputs.lto_mode }}
-      tune_profile: ${{ inputs.tune_profile }}
-      kernel_repo: ${{ inputs.kernel_repo }}
-      kernel_ref: ${{ needs.resolve-ref.outputs.kernel_ref }}
-      release_tag: ${{ inputs.release_tag }}
-
-  publish:
-    needs: build
-    if: ${{ inputs.release_tag != '' && !cancelled() }}
-    runs-on: ubuntu-latest
-    concurrency:
-      group: release-${{ inputs.release_tag }}
-      cancel-in-progress: false
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          path: dist
-          pattern: kernel-*
-          merge-multiple: true
-      - name: 校验
-        run: |
-          ls -lhR dist/ | head -50
-          [ -n "$(find dist -maxdepth 1 -type f -print -quit)" ]
-      - uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ inputs.release_tag }}
-          name: ${{ inputs.release_tag }}
-          files: dist/**          # ← 建议改成 dist/**
-          generate_release_notes: true
-          overwrite_files: true
