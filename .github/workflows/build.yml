@@ -4,41 +4,40 @@ on:
   workflow_dispatch:
     inputs:
       x86_64_deb:
-        description: 'x86_64 deb'
+        description: 'Build x86_64 deb package (kernel image + modules)'
         type: boolean
         default: true
       x86_64_rpm:
-        description: 'x86_64 rpm'
+        description: 'Build x86_64 rpm package (kernel image + modules)'
         type: boolean
         default: false
       x86_64_tarxz:
-        description: 'x86_64 tar.xz'
+        description: 'Build x86_64 universal tar.xz (self-contained, extract & boot)'
         type: boolean
         default: false
       x86_64_pkg:
-        description: 'x86_64 pkg.tar.zst'
+        description: 'Build x86_64 pkg.tar.zst (Arch-style package)'
         type: boolean
         default: false
       arm64_deb:
-        description: 'arm64 deb'
+        description: 'Build arm64 deb package (kernel image + modules)'
         type: boolean
         default: false
       arm64_rpm:
-        description: 'arm64 rpm'
+        description: 'Build arm64 rpm package (kernel image + modules)'
         type: boolean
         default: false
       arm64_tarxz:
-        description: 'arm64 tar.xz'
+        description: 'Build arm64 universal tar.xz (self-contained, extract & boot)'
         type: boolean
         default: false
       arm64_pkg:
-        description: 'arm64 pkg.tar.zst'
+        description: 'Build arm64 pkg.tar.zst (Arch-style package)'
         type: boolean
         default: false
       config_choice:
-        description: 'Kernel config source'
+        description: 'Kernel config preset: default=defconfig, tinyconfig=minimal, or distro config name'
         type: choice
-        required: true
         default: 'default'
         options:
           - 'default'
@@ -63,34 +62,32 @@ on:
           - 'ubuntu'
           - 'void'
       config_custom:
-        description: 'Custom config path/URL'
+        description: 'Custom config: local path (e.g. arch/x86/configs/my_defconfig) or HTTP(S) URL'
         type: string
-        required: false
         default: ''
       respect_config:
-        description: 'Strict .config'
+        description: 'Strict mode: copy .config as-is, skip olddefconfig and orphan-warn fix (recommended ON)'
         type: boolean
         default: true
       include_headers:
-        description: 'Build headers packages'
+        description: 'Build separate headers packages (needed for out-of-tree module compilation)'
         type: boolean
         default: true
       headers_full_tree:
-        description: 'Full source tree in headers'
+        description: 'Copy full include/scripts/arch into headers (ON = faithful to source tree, OFF = minimal subset)'
         type: boolean
         default: true
       strip_modules:
-        description: 'Strip module symbols'
+        description: 'Strip debug symbols from .ko modules (smaller size, no module debugging)'
         type: boolean
         default: false
       tarxz_include_headers:
-        description: 'Include headers in tar.xz'
+        description: 'Include headers directory inside the tar.xz package (makes tar.xz self-contained)'
         type: boolean
         default: true
       parallel_jobs:
-        description: 'Parallel jobs'
+        description: 'Make parallel jobs: auto = nproc, or pick a fixed number'
         type: choice
-        required: false
         default: 'auto'
         options:
           - 'auto'
@@ -100,22 +97,20 @@ on:
           - '8'
           - '16'
       ccache:
-        description: 'Enable ccache'
+        description: 'Enable ccache compiler cache (speeds up rebuilds, uses more disk)'
         type: boolean
         default: false
       lto_mode:
-        description: 'LLVM LTO mode'
+        description: 'LLVM Link-Time Optimization: none=off, full=max optimization, thin=faster link'
         type: choice
-        required: false
         default: 'none'
         options:
           - 'none'
           - 'full'
           - 'thin'
       tune_profile:
-        description: 'Kernel tuning profile'
+        description: 'Kernel tuning preset: none=stock, default=disable debug spam, performance=NO_HZ_FULL+no mitigations, lowlatency=PREEMPT+1000Hz, minimal=-Os+no module sig, debugoff=kill KASAN/ftrace/tracepoints'
         type: choice
-        required: false
         default: 'none'
         options:
           - 'none'
@@ -125,19 +120,16 @@ on:
           - 'minimal'
           - 'debugoff'
       kernel_repo:
-        description: 'Kernel repo URL'
+        description: 'Git repository URL for kernel source (default: linux-stable)'
         type: string
-        required: true
         default: 'https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux-stable.git'
       kernel_ref:
-        description: 'Branch/tag (empty=auto)'
+        description: 'Git branch or tag to checkout (empty = auto-detect latest stable for stable repo, latest tag otherwise)'
         type: string
-        required: false
         default: ''
       release_tag:
-        description: 'Release tag'
+        description: 'If set, publish all built artifacts as a GitHub Release with this tag name (leave empty to skip release)'
         type: string
-        required: false
         default: ''
 
 permissions:
