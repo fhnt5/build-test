@@ -4,39 +4,39 @@ on:
   workflow_dispatch:
     inputs:
       x86_64_deb:
-        description: 'Build x86_64 deb package (kernel image + modules)'
+        description: '构建 x86_64 deb 包（内核镜像 + 模块）'
         type: boolean
         default: true
       x86_64_rpm:
-        description: 'Build x86_64 rpm package (kernel image + modules)'
+        description: '构建 x86_64 rpm 包（内核镜像 + 模块）'
         type: boolean
         default: false
       x86_64_tarxz:
-        description: 'Build x86_64 universal tar.xz (self-contained, extract & boot)'
+        description: '构建 x86_64 tar.xz 通用包（解压即用）'
         type: boolean
         default: false
       x86_64_pkg:
-        description: 'Build x86_64 pkg.tar.zst (Arch-style package)'
+        description: '构建 x86_64 pkg.tar.zst（Arch 风格包）'
         type: boolean
         default: false
       arm64_deb:
-        description: 'Build arm64 deb package (kernel image + modules)'
+        description: '构建 arm64 deb 包（内核镜像 + 模块）'
         type: boolean
         default: false
       arm64_rpm:
-        description: 'Build arm64 rpm package (kernel image + modules)'
+        description: '构建 arm64 rpm 包（内核镜像 + 模块）'
         type: boolean
         default: false
       arm64_tarxz:
-        description: 'Build arm64 universal tar.xz (self-contained, extract & boot)'
+        description: '构建 arm64 tar.xz 通用包（解压即用）'
         type: boolean
         default: false
       arm64_pkg:
-        description: 'Build arm64 pkg.tar.zst (Arch-style package)'
+        description: '构建 arm64 pkg.tar.zst（Arch 风格包）'
         type: boolean
         default: false
       config_choice:
-        description: 'Kernel config preset: default=defconfig, tinyconfig=minimal, or distro config name'
+        description: '内核配置预设：default=默认 defconfig，tinyconfig=最小配置，或选发行版配置名'
         type: choice
         default: 'default'
         options:
@@ -62,31 +62,31 @@ on:
           - 'ubuntu'
           - 'void'
       config_custom:
-        description: 'Custom config: local path (e.g. arch/x86/configs/my_defconfig) or HTTP(S) URL'
+        description: '自定义配置：本地路径（如 arch/x86/configs/my_defconfig）或 HTTP(S) 链接'
         type: string
         default: ''
       respect_config:
-        description: 'Strict mode: copy .config as-is, skip olddefconfig and orphan-warn fix (recommended ON)'
+        description: '严格模式：原样拷贝 .config，跳过 olddefconfig 和 orphan-warn 修补（推荐开启）'
         type: boolean
         default: true
       include_headers:
-        description: 'Build separate headers packages (needed for out-of-tree module compilation)'
+        description: '构建独立的 headers 包（外挂模块编译必需）'
         type: boolean
         default: true
       headers_full_tree:
-        description: 'Copy full include/scripts/arch into headers (ON = faithful to source tree, OFF = minimal subset)'
+        description: 'headers 包拷贝完整源码树（开启=忠实还原，关闭=仅最小子集）'
         type: boolean
         default: true
       strip_modules:
-        description: 'Strip debug symbols from .ko modules (smaller size, no module debugging)'
+        description: '剥离模块调试符号（体积更小，但无法调试模块）'
         type: boolean
         default: false
       tarxz_include_headers:
-        description: 'Include headers directory inside the tar.xz package (makes tar.xz self-contained)'
+        description: 'tar.xz 包内包含 headers 目录（让 tar.xz 自包含所有内容）'
         type: boolean
         default: true
       parallel_jobs:
-        description: 'Make parallel jobs: auto = nproc, or pick a fixed number'
+        description: '并行编译任务数：auto = 自动检测 CPU 核心数'
         type: choice
         default: 'auto'
         options:
@@ -97,11 +97,11 @@ on:
           - '8'
           - '16'
       ccache:
-        description: 'Enable ccache compiler cache (speeds up rebuilds, uses more disk)'
+        description: '启用 ccache 编译器缓存（重编译加速，但占用更多磁盘）'
         type: boolean
         default: false
       lto_mode:
-        description: 'LLVM Link-Time Optimization: none=off, full=max optimization, thin=faster link'
+        description: 'LLVM 链接时优化：none=关闭，full=最大优化，thin=链接更快'
         type: choice
         default: 'none'
         options:
@@ -109,7 +109,7 @@ on:
           - 'full'
           - 'thin'
       tune_profile:
-        description: 'Kernel tuning preset: none=stock, default=disable debug spam, performance=NO_HZ_FULL+no mitigations, lowlatency=PREEMPT+1000Hz, minimal=-Os+no module sig, debugoff=kill KASAN/ftrace/tracepoints'
+        description: '内核调优预设：none=原版，default=关调试日志刷屏，performance=NO_HZ_FULL+关缓解，lowlatency=抢占+1000Hz，minimal=-Os+关模块签名，debugoff=干掉 KASAN/ftrace/探针'
         type: choice
         default: 'none'
         options:
@@ -120,15 +120,15 @@ on:
           - 'minimal'
           - 'debugoff'
       kernel_repo:
-        description: 'Git repository URL for kernel source (default: linux-stable)'
+        description: '内核源码 git 仓库地址（默认：linux-stable）'
         type: string
         default: 'https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux-stable.git'
       kernel_ref:
-        description: 'Git branch or tag to checkout (empty = auto-detect latest stable for stable repo, latest tag otherwise)'
+        description: 'git 分支或标签（留空 = stable 仓库自动检测最新稳定版，其他仓库取最新标签）'
         type: string
         default: ''
       release_tag:
-        description: 'If set, publish all built artifacts as a GitHub Release with this tag name (leave empty to skip release)'
+        description: '填了就发布 GitHub Release（用这个标签名），留空只上传制品不发布'
         type: string
         default: ''
 
@@ -141,7 +141,7 @@ jobs:
     outputs:
       matrix: ${{ steps.gen.outputs.matrix }}
     steps:
-      - name: Generate build matrix
+      - name: 生成构建矩阵
         id: gen
         run: |
           set -uo pipefail
@@ -181,7 +181,7 @@ jobs:
           COUNT=$(echo "$MATRIX" | jq '.include | length')
           echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
           if [ "$COUNT" -eq 0 ]; then
-            echo "No build target selected." >&2
+            echo "没选任何构建目标" >&2
             exit 1
           fi
 
@@ -190,7 +190,7 @@ jobs:
     outputs:
       kernel_ref: ${{ steps.resolve.outputs.kernel_ref }}
     steps:
-      - name: Resolve kernel ref
+      - name: 解析内核版本引用
         id: resolve
         run: |
           set -uo pipefail
@@ -210,7 +210,7 @@ jobs:
               echo "kernel_ref=$STABLE_TAG" >> "$GITHUB_OUTPUT"
               exit 0
             fi
-            echo "ERROR: no stable tag found" >&2
+            echo "ERROR: 找不到 stable 标签" >&2
             exit 1
           fi
           PATTERN='^v?[0-9]+\.[0-9]+(\.[0-9]+)?(-[0-9A-Za-z._-]+)?$'
@@ -224,7 +224,7 @@ jobs:
             LATEST=$(git ls-remote "$REPO" HEAD 2>/dev/null | awk '{print $1; exit}')
           fi
           if [ -z "$LATEST" ]; then
-            echo "ERROR: failed to resolve ref" >&2
+            echo "ERROR: 无法解析版本引用" >&2
             exit 1
           fi
           echo "kernel_ref=$LATEST" >> "$GITHUB_OUTPUT"
@@ -239,7 +239,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set arch variables
+      - name: 设置架构变量
         id: arch
         run: |
           case "${{ matrix.arch }}" in
@@ -256,17 +256,17 @@ jobs:
               echo "arch_boot=arch/arm64/boot/Image" >> "$GITHUB_OUTPUT"
               ;;
             *)
-              echo "Unsupported arch" >&2
+              echo "不支持的架构" >&2
               exit 1
               ;;
           esac
 
-      - name: Free disk space
+      - name: 清理磁盘空间
         run: |
           sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost
           df -h /
 
-      - name: Install build dependencies
+      - name: 安装构建依赖
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential libncurses-dev bison flex \
@@ -274,7 +274,7 @@ jobs:
             rsync kmod xz-utils dpkg-dev rpm git jq curl ccache \
             clang lld llvm
 
-      - name: Clone kernel source
+      - name: 克隆内核源码
         run: |
           set -euo pipefail
           REF="${{ needs.resolve-ref.outputs.kernel_ref }}"
@@ -284,7 +284,7 @@ jobs:
             git clone --branch "$REF" "$REPO" kernel-source
           fi
 
-      - name: Resolve and apply config
+      - name: 解析并应用配置
         run: |
           set -euo pipefail
           CHOICE="${{ inputs.config_choice }}"
@@ -330,7 +330,7 @@ jobs:
               rocky)    URL='https://git.rockylinux.org/rocky/kernel/-/raw/r9/f/kernel-x86_64-fedora.config' ;;
               ubuntu)   URL='https://git.launchpad.net/~ubuntu-kernel/ubuntu/+source/linux/+git/jammy/plain/debian.master/config/amd64/config.flavour.generic' ;;
               void)     URL='https://raw.githubusercontent.com/void-linux/void-packages/master/srcpkgs/linux/files/x86_64-dotconfig' ;;
-              *) echo "Unknown: $CHOICE" >&2; exit 1 ;;
+              *) echo "未知配置: $CHOICE" >&2; exit 1 ;;
             esac
             if [ "$KARCH" = "arm64" ]; then
               case "$CHOICE" in
@@ -358,7 +358,7 @@ jobs:
             make ARCH="$KARCH" olddefconfig </dev/null
           fi
 
-      - name: Apply tuning profile
+      - name: 应用调优预设
         run: |
           set -euo pipefail
           cd kernel-source
@@ -432,7 +432,7 @@ jobs:
             make ARCH="$KARCH" olddefconfig </dev/null
           fi
 
-      - name: Compile kernel
+      - name: 编译内核
         run: |
           set -euo pipefail
           cd kernel-source
@@ -469,7 +469,7 @@ jobs:
 
           make $MAKE_ARGS
 
-      - name: Stage kernel artifacts
+      - name: 暂存内核产物
         id: stage
         run: |
           set -euo pipefail
@@ -478,7 +478,7 @@ jobs:
           KIMAGE="${{ steps.arch.outputs.arch_boot }}"
 
           KVER="$(make ARCH="$KARCH" -s kernelrelease)"
-          echo "Kernel release: $KVER"
+          echo "内核版本: $KVER"
           STAGE_DIR="$(mktemp -d)"
           echo "STAGE=$STAGE_DIR" >> "$GITHUB_ENV"
           echo "KVER=$KVER" >> "$GITHUB_ENV"
@@ -495,7 +495,7 @@ jobs:
           fi
           rm -f "$STAGE_DIR/lib/modules/${KVER}/build" "$STAGE_DIR/lib/modules/${KVER}/source"
 
-      - name: Stage headers
+      - name: 暂存 headers
         if: inputs.include_headers == 'true'
         run: |
           set -euo pipefail
@@ -526,7 +526,7 @@ jobs:
 
           cp Makefile .config Module.symvers Kbuild "$HDR_DIR/" 2>/dev/null || true
 
-      - name: Package deb
+      - name: 打包 deb
         if: contains(matrix.formats, 'deb')
         run: |
           set -euo pipefail
@@ -569,7 +569,7 @@ jobs:
             dpkg-deb --root-owner-group --build "$HDR_DIR" "dist/deb/linux-headers-${KVER}_${DEB_ARCH}.deb"
           fi
 
-      - name: Package rpm
+      - name: 打包 rpm
         if: contains(matrix.formats, 'rpm')
         run: |
           set -euo pipefail
@@ -646,7 +646,7 @@ jobs:
           mkdir -p dist/rpm
           find "$RPM_TOPDIR/RPMS" -name '*.rpm' -exec cp {} dist/rpm/ \;
 
-      - name: Package tar.xz
+      - name: 打包 tar.xz
         if: contains(matrix.formats, 'tarxz')
         run: |
           set -euo pipefail
@@ -668,7 +668,7 @@ jobs:
           cat > "$PKG_ROOT/install-${KVER}.sh" <<INSTALL_EOF
           #!/bin/sh
           set -e
-          [ "\$(id -u)" = "0" ] || { echo "Run as root" >&2; exit 1; }
+          [ "\$(id -u)" = "0" ] || { echo "请 root 运行" >&2; exit 1; }
           mkdir -p /boot
           cp -a "$PKG_ROOT/boot/"* /boot/ 2>/dev/null || true
           cp -a "$PKG_ROOT/lib/modules/${KVER}" /lib/modules/ 2>/dev/null || true
@@ -676,7 +676,7 @@ jobs:
             cp -a "$PKG_ROOT/usr/src/linux-headers-${KVER}" /usr/src/
           fi
           depmod ${KVER} 2>/dev/null || true
-          echo "Done."
+          echo "完成"
           INSTALL_EOF
           chmod 755 "$PKG_ROOT/install-${KVER}.sh"
 
@@ -684,7 +684,7 @@ jobs:
           ( cd "$(dirname "$PKG_ROOT")" && tar --owner=0 --group=0 --numeric-owner -cJf \
             "$OLDPWD/dist/tarxz/linux-${KVER}-${ARCH}.tar.xz" "$(basename "$PKG_ROOT")" )
 
-      - name: Package pkg.tar.zst
+      - name: 打包 pkg.tar.zst
         if: contains(matrix.formats, 'pkg')
         run: |
           set -euo pipefail
@@ -723,7 +723,7 @@ jobs:
               zstd -T0 -19 -o "$OLDPWD/dist/pkg/linux-headers-${KVER}-${ARCH}.pkg.tar.zst" -f )
           fi
 
-      - name: Upload artifacts
+      - name: 上传制品
         if: always() && !cancelled()
         uses: actions/upload-artifact@v4
         with:
@@ -732,7 +732,7 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
-      - name: Collect dist
+      - name: 统计产物大小
         if: always() && !cancelled()
         run: find dist -type f -exec ls -lh {} \; 2>/dev/null || true
 
