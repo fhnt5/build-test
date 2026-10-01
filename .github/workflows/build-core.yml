@@ -308,8 +308,8 @@ jobs:
           KVER="$(make ARCH="$KARCH" -s kernelrelease)"
           echo "内核版本: $KVER"
           STAGE_DIR="$(mktemp -d)"
-          echo "STAGE=$STAGE_DIR" >> "$GITHUB_ENV"
-          echo "KVER=$KVER" >> "$GITHUB_ENV"
+          echo "STAGE=$STAGE_DIR" >> "$GITHUB_OUTPUT"
+          echo "KVER=$KVER" >> "$GITHUB_OUTPUT"
 
           mkdir -p "$STAGE_DIR/boot"
           cp "$KIMAGE" "$STAGE_DIR/boot/vmlinuz-${KVER}"
@@ -324,14 +324,16 @@ jobs:
           rm -f "$STAGE_DIR/lib/modules/${KVER}/build" "$STAGE_DIR/lib/modules/${KVER}/source"
 
       - name: 暂存 headers
+        id: headers
         if: ${{ inputs.include_headers == 'true' }}
         run: |
           set -euo pipefail
           cd kernel-source
           KARCH="${{ steps.arch.outputs.karch }}"
+          KVER="${{ steps.stage.outputs.KVER }}"
 
           HDR_STAGE_DIR="$(mktemp -d)"
-          echo "HDR_STAGE=$HDR_STAGE_DIR" >> "$GITHUB_ENV"
+          echo "HDR_STAGE=$HDR_STAGE_DIR" >> "$GITHUB_OUTPUT"
 
           HDR_DIR="$HDR_STAGE_DIR/usr/src/linux-headers-${KVER}"
           mkdir -p "$HDR_DIR"
@@ -359,6 +361,8 @@ jobs:
         run: |
           set -euo pipefail
           DEB_ARCH="${{ steps.arch.outputs.deb_arch }}"
+          STAGE="${{ steps.stage.outputs.STAGE }}"
+          KVER="${{ steps.stage.outputs.KVER }}"
           mkdir -p dist/deb
 
           IMG_DIR="$(mktemp -d)/linux-image-${KVER}"
@@ -383,6 +387,7 @@ jobs:
           dpkg-deb --root-owner-group --build "$IMG_DIR" "dist/deb/linux-image-${KVER}_${DEB_ARCH}.deb"
 
           if [ "${{ inputs.include_headers }}" = "true" ]; then
+            HDR_STAGE="${{ steps.headers.outputs.HDR_STAGE }}"
             HDR_DIR="$(mktemp -d)/linux-headers-${KVER}"
             mkdir -p "$HDR_DIR/DEBIAN" "$HDR_DIR/usr/src/linux-headers-${KVER}"
             cp -a "$HDR_STAGE/usr/src/linux-headers-${KVER}/." "$HDR_DIR/usr/src/linux-headers-${KVER}/"
@@ -403,6 +408,8 @@ jobs:
         run: |
           set -euo pipefail
           RPM_ARCH="${{ steps.arch.outputs.rpm_arch }}"
+          STAGE="${{ steps.stage.outputs.STAGE }}"
+          KVER="${{ steps.stage.outputs.KVER }}"
           RPM_VER="$(echo "$KVER" | rev | cut -d'-' -f2- | rev)"
           RPM_REL="$(echo "$KVER" | rev | cut -d'-' -f1 | rev)_1"
           if [ -z "$RPM_VER" ]; then RPM_VER="$KVER"; fi
@@ -411,38 +418,38 @@ jobs:
           RPM_TOPDIR="$(mktemp -d)"
           mkdir -p "$RPM_TOPDIR"/{BUILD,RPMS,SOURCES,SPECS,BUILDROOT}
 
-          cat > "$RPM_TOPDIR/SPECS/kernel-image.spec" <<'SPEC_EOF'
-          %global debug_package %{nil}
-          %global __strip /bin/true
-          %global __find_provides %{nil}
-          %global __find_requires %{nil}
-          %define _unpackaged_files_terminate_build 0
-
-          Name: kernel-image-KVER
-          Version: RPM_VER
-          Release: RPM_REL
-          Summary: Linux kernel KVER
-          License: GPL-2.0-only
-          AutoReqProv: no
-          BuildArch: RPM_ARCH
-
-          %description
-          Kernel image and modules
-
-          %install
-          rm -rf %{buildroot}
-          mkdir -p %{buildroot}/boot %{buildroot}/lib/modules
-          cp STAGE/boot/vmlinuz-KVER %{buildroot}/boot/ 2>/dev/null || :
-          cp STAGE/boot/System.map-KVER %{buildroot}/boot/ 2>/dev/null || :
-          cp STAGE/boot/config-KVER %{buildroot}/boot/ 2>/dev/null || :
-          cp -a STAGE/lib/modules/KVER %{buildroot}/lib/modules/ 2>/dev/null || :
-
-          %files
-          /boot/vmlinuz-KVER
-          /boot/System.map-KVER
-          /boot/config-KVER
-          /lib/modules/KVER
-          SPEC_EOF
+          printf '%s\n' \
+            '%global debug_package %{nil}' \
+            '%global __strip /bin/true' \
+            '%global __find_provides %{nil}' \
+            '%global __find_requires %{nil}' \
+            '%define _unpackaged_files_terminate_build 0' \
+            '' \
+            'Name: kernel-image-KVER' \
+            'Version: RPM_VER' \
+            'Release: RPM_REL' \
+            'Summary: Linux kernel KVER' \
+            'License: GPL-2.0-only' \
+            'AutoReqProv: no' \
+            'BuildArch: RPM_ARCH' \
+            '' \
+            '%description' \
+            'Kernel image and modules' \
+            '' \
+            '%install' \
+            'rm -rf %{buildroot}' \
+            'mkdir -p %{buildroot}/boot %{buildroot}/lib/modules' \
+            'cp STAGE/boot/vmlinuz-KVER %{buildroot}/boot/ 2>/dev/null || :' \
+            'cp STAGE/boot/System.map-KVER %{buildroot}/boot/ 2>/dev/null || :' \
+            'cp STAGE/boot/config-KVER %{buildroot}/boot/ 2>/dev/null || :' \
+            'cp -a STAGE/lib/modules/KVER %{buildroot}/lib/modules/ 2>/dev/null || :' \
+            '' \
+            '%files' \
+            '/boot/vmlinuz-KVER' \
+            '/boot/System.map-KVER' \
+            '/boot/config-KVER' \
+            '/lib/modules/KVER' \
+            > "$RPM_TOPDIR/SPECS/kernel-image.spec"
 
           sed -i "s|KVER|${KVER}|g" "$RPM_TOPDIR/SPECS/kernel-image.spec"
           sed -i "s|RPM_VER|${RPM_VER}|g" "$RPM_TOPDIR/SPECS/kernel-image.spec"
@@ -451,29 +458,31 @@ jobs:
           sed -i "s|STAGE|${STAGE}|g" "$RPM_TOPDIR/SPECS/kernel-image.spec"
 
           if [ "${{ inputs.include_headers }}" = "true" ]; then
-            cat > "$RPM_TOPDIR/SPECS/kernel-headers.spec" <<'SPEC_EOF'
-            %global debug_package %{nil}
-            %global __strip /bin/true
-            %global __find_provides %{nil}
-            %global __find_requires %{nil}
-            %define _unpackaged_files_terminate_build 0
+            HDR_STAGE="${{ steps.headers.outputs.HDR_STAGE }}"
 
-            Name: kernel-headers-KVER
-            Version: RPM_VER
-            Release: RPM_REL
-            Summary: Headers for KVER
-            License: GPL-2.0-only
-            AutoReqProv: no
-            BuildArch: RPM_ARCH
-
-            %install
-            rm -rf %{buildroot}
-            mkdir -p %{buildroot}/usr/src/linux-headers-KVER
-            cp -a HDR_STAGE/usr/src/linux-headers-KVER/. %{buildroot}/usr/src/linux-headers-KVER/
-
-            %files
-            /usr/src/linux-headers-KVER
-            SPEC_EOF
+            printf '%s\n' \
+              '%global debug_package %{nil}' \
+              '%global __strip /bin/true' \
+              '%global __find_provides %{nil}' \
+              '%global __find_requires %{nil}' \
+              '%define _unpackaged_files_terminate_build 0' \
+              '' \
+              'Name: kernel-headers-KVER' \
+              'Version: RPM_VER' \
+              'Release: RPM_REL' \
+              'Summary: Headers for KVER' \
+              'License: GPL-2.0-only' \
+              'AutoReqProv: no' \
+              'BuildArch: RPM_ARCH' \
+              '' \
+              '%install' \
+              'rm -rf %{buildroot}' \
+              'mkdir -p %{buildroot}/usr/src/linux-headers-KVER' \
+              'cp -a HDR_STAGE/usr/src/linux-headers-KVER/. %{buildroot}/usr/src/linux-headers-KVER/' \
+              '' \
+              '%files' \
+              '/usr/src/linux-headers-KVER' \
+              > "$RPM_TOPDIR/SPECS/kernel-headers.spec"
 
             sed -i "s|KVER|${KVER}|g" "$RPM_TOPDIR/SPECS/kernel-headers.spec"
             sed -i "s|RPM_VER|${RPM_VER}|g" "$RPM_TOPDIR/SPECS/kernel-headers.spec"
@@ -493,6 +502,8 @@ jobs:
         run: |
           set -euo pipefail
           ARCH="${{ inputs.arch }}"
+          STAGE="${{ steps.stage.outputs.STAGE }}"
+          KVER="${{ steps.stage.outputs.KVER }}"
           PKG_ROOT="$(mktemp -d)/linux-${KVER}-${ARCH}"
           mkdir -p "$PKG_ROOT/boot" "$PKG_ROOT/lib/modules"
 
@@ -502,23 +513,24 @@ jobs:
           cp -a "$STAGE/lib/modules/${KVER}" "$PKG_ROOT/lib/modules/"
 
           if [ "${{ inputs.include_headers }}" = "true" ] && [ "${{ inputs.tarxz_include_headers }}" = "true" ]; then
+            HDR_STAGE="${{ steps.headers.outputs.HDR_STAGE }}"
             mkdir -p "$PKG_ROOT/usr/src"
             cp -a "$HDR_STAGE/usr/src/linux-headers-${KVER}" "$PKG_ROOT/usr/src/"
           fi
 
-          {
-            echo '#!/bin/sh'
-            echo 'set -e'
-            echo '[ "$(id -u)" = "0" ] || { echo "请 root 运行" >&2; exit 1; }'
-            echo 'mkdir -p /boot'
-            echo "cp -a \"$PKG_ROOT/boot/\"* /boot/ 2>/dev/null || true"
-            echo "cp -a \"$PKG_ROOT/lib/modules/${KVER}\" /lib/modules/ 2>/dev/null || true"
-            echo "if [ -d \"$PKG_ROOT/usr/src/linux-headers-${KVER}\" ]; then"
-            echo "  cp -a \"$PKG_ROOT/usr/src/linux-headers-${KVER}\" /usr/src/"
-            echo 'fi'
-            echo "depmod ${KVER} 2>/dev/null || true"
-            echo 'echo "完成"'
-          } > "$PKG_ROOT/install-${KVER}.sh"
+          printf '%s\n' \
+            '#!/bin/sh' \
+            'set -e' \
+            '[ "$(id -u)" = "0" ] || { echo "请 root 运行" >&2; exit 1; }' \
+            'mkdir -p /boot' \
+            "cp -a \"$PKG_ROOT/boot/\"* /boot/ 2>/dev/null || true" \
+            "cp -a \"$PKG_ROOT/lib/modules/${KVER}\" /lib/modules/ 2>/dev/null || true" \
+            "if [ -d \"$PKG_ROOT/usr/src/linux-headers-${KVER}\" ]; then" \
+            "  cp -a \"$PKG_ROOT/usr/src/linux-headers-${KVER}\" /usr/src/" \
+            'fi' \
+            "depmod ${KVER} 2>/dev/null || true" \
+            'echo "完成"' \
+            > "$PKG_ROOT/install-${KVER}.sh"
           chmod 755 "$PKG_ROOT/install-${KVER}.sh"
 
           mkdir -p dist/tarxz
@@ -529,6 +541,8 @@ jobs:
         run: |
           set -euo pipefail
           ARCH="${{ inputs.arch }}"
+          STAGE="${{ steps.stage.outputs.STAGE }}"
+          KVER="${{ steps.stage.outputs.KVER }}"
 
           IMG_ROOT="$(mktemp -d)"
           mkdir -p "$IMG_ROOT/boot" "$IMG_ROOT/lib/modules"
@@ -548,6 +562,7 @@ jobs:
           cd "$IMG_ROOT" && tar --owner=0 --group=0 --numeric-owner -cf - . | zstd -T0 -19 -o "$OLDPWD/dist/pkg/linux-image-${KVER}-${ARCH}.pkg.tar.zst" -f
 
           if [ "${{ inputs.include_headers }}" = "true" ]; then
+            HDR_STAGE="${{ steps.headers.outputs.HDR_STAGE }}"
             HDR_ROOT="$(mktemp -d)"
             mkdir -p "$HDR_ROOT/usr/src/linux-headers-${KVER}"
             cp -a "$HDR_STAGE/usr/src/linux-headers-${KVER}/." "$HDR_ROOT/usr/src/linux-headers-${KVER}/"
