@@ -120,12 +120,12 @@ jobs:
         LOG_FILE="$1"; FMT="$2"; ARCH="$3"
         [ -f "$LOG_FILE" ] || { echo "WARN: analyze-log.sh: no log at $LOG_FILE"; exit 0; }
 
-        ERR_PATTERN='(^|[[:space:]])error:|^[^:]*make(\[[0-9]+\])?: \*\*\*|(^|[[:space:]])Error [0-9]+|undefined reference to|multiple definition of|(^|[[:space:]])FAILED:|(^|[[:space:]])ERROR:|(^|[[:space:]])FATAL|ld: cannot find|cannot find -l|(^|[[:space:]])No such file or directory|invalid option|unknown option|unrecognized option|invalid argument'
+        ERR_PATTERN='(^|[[:space:]])error:|^[^:]*make(\[[0-9]+\])?: \*\*\*|(^|[[:space:]])Error [0-9]+|undefined reference to|multiple definition of|(^|[[:space:]])FAILED:|(^|[[:space:]])ERROR:|(^|[[:space:]])FATAL|ld: cannot find|cannot find -l|(^|[[:space:]])No such file or directory|invalid option|unknown option|unrecognized option|invalid argument|pahole:|libbpf:|failed to load BTF|failed to find .\.BTF|No data available'
 
         ERR_FILTER='WERROR|CONFIG_.*ERROR|ERROR_|-error|perl-error|/tmpfiles\.d/|error_injection|verbose_error|_ERROR_'
 
         WARN_PATTERN='(^|[[:space:]])(warning|Warning|WARNING):|(^|[[:space:]])WARNING:|deprecated|may be used uninitialized'
-        WARN_FILTER='is up to date -- skipping|Skipping dependency|up to date -- skipping|Userspace interface \(deprecated\)'
+        WARN_FILTER='is up to date -- skipping|Skipping dependency|up to date -- skipping|Userspace interface \(deprecated\)|htmldocs'
 
         RAW_ERR=$(grep -nE "$ERR_PATTERN" "$LOG_FILE" 2>/dev/null || true)
         RAW_WARN=$(grep -nE "$WARN_PATTERN" "$LOG_FILE" 2>/dev/null || true)
@@ -359,10 +359,6 @@ jobs:
           base-devel git libarchive jq bc rsync kmod inetutils \
           elfutils debugedit zstd pahole
 
-        # ── 关键修复 A：关闭 -Werror=format-security ──
-        # bpftool bootstrap 编译时 host cc1 收到 -Wformat-security 但缺 -Wformat，
-        # 原本只是警告，被 -Werror=format-security 升级为致命错误。
-        # 必须改 /etc/makepkg.conf（环境变量 CFLAGS 会被 makepkg 从文件覆盖）。
         sed -i 's/-Werror=format-security/-Wno-error=format-security/g' /etc/makepkg.conf
         echo "---- makepkg.conf CFLAGS after patch ----"
         grep -E '^(CFLAGS|CXXFLAGS)=' /etc/makepkg.conf || true
@@ -437,15 +433,9 @@ jobs:
 
         sed -i "s/^pkgbase=.*/pkgbase=linux-custom/" PKGBUILD
 
-        # ── 关键修复 B：跳过 htmldocs 目标 ──
-        sed -i 's/make htmldocs/: # htmldocs disabled by build script/g' PKGBUILD
-        echo "---- PKGBUILD htmldocs check (after patch) ----"
-        if grep -q htmldocs PKGBUILD; then
-          echo "WARN: htmldocs still referenced in PKGBUILD:"
-          grep -n htmldocs PKGBUILD
-        else
-          echo "OK: no htmldocs references found"
-        fi
+        sed -i 's/make htmldocs/: # htmldocs disabled/g' PKGBUILD
+        echo "---- PKGBUILD htmldocs check ----"
+        grep -q htmldocs PKGBUILD && { echo "WARN: htmldocs still present:"; grep -n htmldocs PKGBUILD; } || echo "OK: no htmldocs"
         echo "---- end ----"
 
         mkdir -p src
@@ -456,10 +446,6 @@ jobs:
 
         sed -i -E "s|cp[[:space:]]+(\"?\\\$\{srcdir\}/)?\.?\.?/?config\.[^[:space:]\"]+[[:space:]]+\.config|cp /tmp/kernel.config .config|g" PKGBUILD
         sed -i -E "s|cp[[:space:]]+\"?\\\$\{srcdir\}/config\"?[[:space:]]+\.config|cp /tmp/kernel.config .config|g" PKGBUILD
-
-        echo "──── PKGBUILD config references (after patch) ────"
-        grep -nE '(^|[^a-zA-Z_])config([^a-zA-Z_]|$|\.)' PKGBUILD | head -30 || true
-        echo "──── end ────"
 
         echo ""
         echo "════════════ makepkg -o (prepare only) ════════════"
@@ -493,15 +479,24 @@ jobs:
         fi
         echo "kconfig OK."
 
-        PAHOLE_FLAGS="$SRC_DIR/scripts/pahole-flags.sh"
-        if [ -f "$PAHOLE_FLAGS" ] && ! grep -q 'skip_encoding_btf_enum64' "$PAHOLE_FLAGS"; then
-          printf '\nif [ "${pahole_ver}" -ge "124" ]; then\n  extra_paholeopt="${extra_paholeopt} --skip_encoding_btf_enum64"\nfi\n' >> "$PAHOLE_FLAGS"
-          echo "Injected --skip_encoding_btf_enum64"
-        else
-          echo "pahole-flags.sh: patch not needed or file not found"
+        case "$(uname -m)" in
+          x86_64|amd64) KARCH_SYNC="x86_64" ;;
+          aarch64|arm64) KARCH_SYNC="arm64" ;;
+          *) KARCH_SYNC="$(uname -m)" ;;
+        esac
+        echo ""
+        echo "════════════ make syncconfig ════════════"
+        (cd "$SRC_DIR" && make ARCH="$KARCH_SYNC" syncconfig >/dev/null 2>&1) \
+          || echo "WARN: syncconfig returned non-zero"
+        echo ""
+        echo "════════════ Verifying kconfig after syncconfig ════════════"
+        if ! check_kconfig "$SRC_DIR/.config"; then
+          echo "FATAL: BTF config was stripped by syncconfig (dependency missing in 7.2.8)" >&2
+          grep -nE 'DEBUG_INFO|BTF|RANDSTRUCT|WERROR|ORPHAN' "$SRC_DIR/.config" >&2
+          exit 1
         fi
+        echo "kconfig still OK after syncconfig."
 
-        # makepkg 没有 --keep 长选项
         echo ""
         echo "════════════ makepkg -e (build only) ════════════"
         LOG="$HOME/arch-pkg/makepkg-build.log"
@@ -514,19 +509,28 @@ jobs:
         echo "[1] .config BTF/WERROR lines:"
         grep -nE 'DEBUG_INFO|BTF|RANDSTRUCT|WERROR|ORPHAN' "$SRC_DIR/.config" || echo "(none)"
         echo ""
-        echo "[2] vmlinux .BTF section check:"
+        echo "[2] vmlinux files:"
+        ls -la "$SRC_DIR"/vmlinux* 2>/dev/null || echo "(no vmlinux files)"
+        echo ""
+        echo "[3] vmlinux .BTF section:"
         if [ -f "$SRC_DIR/vmlinux" ]; then
-          ls -lh "$SRC_DIR/vmlinux"
           readelf -S "$SRC_DIR/vmlinux" 2>/dev/null | grep -i BTF || echo "(NO .BTF SECTION)"
         else
           echo "(no vmlinux)"
         fi
         echo ""
-        echo "[3] pahole version:"
-        pahole --version 2>&1 || true
+        echo "[4] .vmlinux.btf.cmd:"
+        [ -f "$SRC_DIR/.vmlinux.btf.cmd" ] && cat "$SRC_DIR/.vmlinux.btf.cmd" || echo "(not found)"
         echo ""
-        echo "[4] PKGBUILD prepare() function:"
-        awk '/^prepare\(\)/,/^}/' "$HOME/arch-pkg/PKGBUILD" || true
+        echo "[5] scripts/pahole-flags.sh:"
+        if [ -f "$SRC_DIR/scripts/pahole-flags.sh" ]; then
+          cat "$SRC_DIR/scripts/pahole-flags.sh"
+        else
+          echo "(file not found)"
+        fi
+        echo ""
+        echo "[6] pahole version:"
+        pahole --version 2>&1 || true
         echo "════════════════════════════════════════════════════"
 
         exit "${rc:-1}"
