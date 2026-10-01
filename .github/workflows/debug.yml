@@ -120,7 +120,6 @@ jobs:
         LOG_FILE="$1"; FMT="$2"; ARCH="$3"
         [ -f "$LOG_FILE" ] || { echo "WARN: analyze-log.sh: no log at $LOG_FILE"; exit 0; }
 
-        # 精确匹配：只在明确是错误时命中；新增 invalid/unknown option 覆盖参数错误
         ERR_PATTERN='(^|[[:space:]])error:|^[^:]*make(\[[0-9]+\])?: \*\*\*|(^|[[:space:]])Error [0-9]+|undefined reference to|multiple definition of|(^|[[:space:]])FAILED:|(^|[[:space:]])ERROR:|(^|[[:space:]])FATAL|ld: cannot find|cannot find -l|(^|[[:space:]])No such file or directory|invalid option|unknown option|unrecognized option|invalid argument'
 
         ERR_FILTER='WERROR|CONFIG_.*ERROR|ERROR_|-error|perl-error|/tmpfiles\.d/|error_injection|verbose_error|_ERROR_'
@@ -360,6 +359,15 @@ jobs:
           base-devel git libarchive jq bc rsync kmod inetutils \
           elfutils debugedit zstd pahole
 
+        # ── 关键修复 A：关闭 -Werror=format-security ──
+        # bpftool bootstrap 编译时 host cc1 收到 -Wformat-security 但缺 -Wformat，
+        # 原本只是警告，被 -Werror=format-security 升级为致命错误。
+        # 必须改 /etc/makepkg.conf（环境变量 CFLAGS 会被 makepkg 从文件覆盖）。
+        sed -i 's/-Werror=format-security/-Wno-error=format-security/g' /etc/makepkg.conf
+        echo "---- makepkg.conf CFLAGS after patch ----"
+        grep -E '^(CFLAGS|CXXFLAGS)=' /etc/makepkg.conf || true
+        echo "---- end ----"
+
         useradd -m builder 2>/dev/null || true
 
         cp /host-staging/kernel.config    /home/builder/kernel.config
@@ -429,6 +437,17 @@ jobs:
 
         sed -i "s/^pkgbase=.*/pkgbase=linux-custom/" PKGBUILD
 
+        # ── 关键修复 B：跳过 htmldocs 目标 ──
+        sed -i 's/make htmldocs/: # htmldocs disabled by build script/g' PKGBUILD
+        echo "---- PKGBUILD htmldocs check (after patch) ----"
+        if grep -q htmldocs PKGBUILD; then
+          echo "WARN: htmldocs still referenced in PKGBUILD:"
+          grep -n htmldocs PKGBUILD
+        else
+          echo "OK: no htmldocs references found"
+        fi
+        echo "---- end ----"
+
         mkdir -p src
         for name in config config.x86_64 config.aarch64 config.arm64 "config.${CARCH_LOCAL}"; do
           cp ~/kernel.config "src/$name"
@@ -482,7 +501,7 @@ jobs:
           echo "pahole-flags.sh: patch not needed or file not found"
         fi
 
-        # ── 注意：makepkg 没有 --keep 长选项；这里不加，构建失败时 makepkg 默认保留 srcdir ──
+        # makepkg 没有 --keep 长选项
         echo ""
         echo "════════════ makepkg -e (build only) ════════════"
         LOG="$HOME/arch-pkg/makepkg-build.log"
