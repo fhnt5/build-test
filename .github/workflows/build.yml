@@ -12,7 +12,7 @@ on:
       arm64_tarxz:  { description: 'arm64   ›  tar.xz（全发行版通用 + install/uninstall）', type: boolean, default: false }
       arm64_pkg:    { description: 'arm64   ›  pkg.tar.zst（Arch 包）', type: boolean, default: false }
       config_choice:
-        description: '内核配置来源：内核自带目标 / 仓库 configs/* / 发行版'
+        description: '内核配置来源：内核自带目标 / 仓库 configs/* / make:<target> / 发行版'
         type: choice
         required: true
         default: 'default'
@@ -39,7 +39,7 @@ on:
           - 'ubuntu'
           - 'void'
       config_custom:
-        description: '（可选）自定义配置：仓库内路径 / http(s):// URL。填了则覆盖上面的选择'
+        description: '（可选）自定义配置：仓库内路径 / http(s):// URL / make:<target>。填了则覆盖上面的选择'
         type: string
         required: false
         default: ''
@@ -48,7 +48,7 @@ on:
         required: true
         default: 'https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux-stable.git'
       kernel_ref:
-        description: '分支或 tag（如 v7.2.6 / master）。留空则自动使用最新 stable 版本'
+        description: '分支或 tag（如 v7.2.6 / v6.12.5-zen1 / master）。留空则自动使用该仓库最新版本'
         required: false
         default: ''
       release_tag:
@@ -106,17 +106,38 @@ jobs:
         run: |
           set -uo pipefail
           INPUT_REF="${{ inputs.kernel_ref }}"
+          REPO="${{ inputs.kernel_repo }}"
+
           if [ -n "$INPUT_REF" ]; then
             echo "kernel_ref=$INPUT_REF" >> "$GITHUB_OUTPUT"
-          else
-            LATEST=$(git ls-remote --tags --refs --sort=-v:refname \
-              https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux-stable.git \
-              | awk -F/ '{print $NF}' \
-              | grep -E '^v[0-9]+\.[0-9]+(\.[0-9]+)?$' \
-              | head -1 || true)
-            [ -z "$LATEST" ] && { echo "ERROR: failed to detect" >&2; exit 1; }
-            echo "kernel_ref=$LATEST" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
+
+          echo "Auto-detecting latest ref from: $REPO"
+
+          # 通用版本号：允许上游 v6.12.5，也允许下游 v6.12.5-zen1 / 6.12.5-xanmod1 / 6.12.5-1-cachyos
+          PATTERN='^v?[0-9]+\.[0-9]+(\.[0-9]+)?(-[0-9A-Za-z._-]+)?$'
+
+          LATEST=$(git ls-remote --tags --refs --sort=-v:refname "$REPO" 2>/dev/null \
+            | awk -F/ '{print $NF}' \
+            | grep -E "$PATTERN" \
+            | head -1 || true)
+
+          # 兜底 1：没有任何符合模式 tag（比如 Liquorix 只用分支）→ 取默认分支
+          if [ -z "$LATEST" ]; then
+            echo "WARNING: no version-like tags found, falling back to default branch" >&2
+            LATEST=$(git ls-remote --symref "$REPO" HEAD 2>/dev/null \
+              | awk '/^ref:/ {sub("refs/heads/","",$2); print $2; exit}')
+          fi
+
+          # 兜底 2：HEAD 是 detached，直接拿 SHA
+          if [ -z "$LATEST" ]; then
+            LATEST=$(git ls-remote "$REPO" HEAD 2>/dev/null | awk '{print $1; exit}')
+          fi
+
+          [ -z "$LATEST" ] && { echo "ERROR: failed to resolve ref for $REPO" >&2; exit 1; }
+          echo "Resolved ref: $LATEST"
+          echo "kernel_ref=$LATEST" >> "$GITHUB_OUTPUT"
 
   build:
     needs: [prepare, resolve-ref]
@@ -133,6 +154,7 @@ jobs:
       run: |
         echo "Arch:    ${{ matrix.arch }}"
         echo "Formats: ${{ join(matrix.formats, ', ') }}"
+        echo "Repo:    ${{ inputs.kernel_repo }}"
         echo "Ref:     ${{ needs.resolve-ref.outputs.kernel_ref }}"
         echo "Runner:  ${{ runner.os }} / ${{ runner.arch }}"
 
@@ -175,8 +197,15 @@ jobs:
 
     - name: Clone kernel source
       run: |
-        git clone --depth 1 --branch "${{ needs.resolve-ref.outputs.kernel_ref }}" \
-          "${{ inputs.kernel_repo }}" kernel-source
+        set -euo pipefail
+        REF="${{ needs.resolve-ref.outputs.kernel_ref }}"
+        REPO="${{ inputs.kernel_repo }}"
+        echo "Cloning $REPO @ $REF ..."
+        if ! git clone --depth 1 --branch "$REF" "$REPO" kernel-source; then
+          echo "WARNING: shallow clone failed, retrying with full clone ..." >&2
+          rm -rf kernel-source
+          git clone --branch "$REF" "$REPO" kernel-source
+        fi
 
     - name: Resolve and apply config
       run: |
@@ -193,6 +222,10 @@ jobs:
         if [[ "$CHOICE" == http://* ]] || [[ "$CHOICE" == https://* ]]; then
           echo "==> Source: URL: $CHOICE"
           curl -fSL "$CHOICE" -o "$CONFIG_OUT" || { echo "ERROR: download $CHOICE failed" >&2; exit 1; }
+        elif [[ "$CHOICE" == make:* ]]; then
+          TARGET="${CHOICE#make:}"
+          echo "==> Source: kernel make target: make $TARGET"
+          ( cd kernel-source && make ARCH="$KARCH" "$TARGET" && cp .config "$CONFIG_OUT" )
         elif [ -f "$CHOICE" ]; then
           echo "==> Source: repo file: $CHOICE"
           cp "$CHOICE" "$CONFIG_OUT"
@@ -224,6 +257,30 @@ jobs:
             void)     URL='https://raw.githubusercontent.com/void-linux/void-packages/master/srcpkgs/linux/files/x86_64-dotconfig' ;;
             *) echo "Unknown config_choice: $CHOICE" >&2; exit 1 ;;
           esac
+
+          # arm64 覆盖：只在明确提供时生效；否则保留原行为并给出警告
+          if [ "$KARCH" = "arm64" ]; then
+            ARCH_URL=""
+            case "$CHOICE" in
+              alma)     ARCH_URL='https://git.almalinux.org/rpms/kernel/-/raw/c9/f/kernel-aarch64-fedora.config' ;;
+              alpine)   ARCH_URL='https://gitlab.alpinelinux.org/alpine/aports/-/raw/master/main/linux-lts/config-lts.aarch64' ;;
+              centos)   ARCH_URL='https://gitlab.com/redhat/centos-stream/rpms/kernel/-/raw/c9s/f/kernel-aarch64-fedora.config' ;;
+              fedora)   ARCH_URL='https://src.fedoraproject.org/rpms/kernel/raw/rawhide/f/kernel-aarch64-fedora.config' ;;
+              opensuse) ARCH_URL='https://raw.githubusercontent.com/openSUSE/kernel-source/master/config/arm64/default' ;;
+              rhel)     ARCH_URL='https://gitlab.com/redhat/centos-stream/rpms/kernel/-/raw/c9s/f/kernel-aarch64-fedora.config' ;;
+              rocky)    ARCH_URL='https://git.rockylinux.org/rocky/kernel/-/raw/r9/f/kernel-aarch64-fedora.config' ;;
+              ubuntu)   ARCH_URL='https://git.launchpad.net/~ubuntu-kernel/ubuntu/+source/linux/+git/jammy/plain/debian.master/config/arm64/config.flavour.generic' ;;
+              void)     ARCH_URL='https://raw.githubusercontent.com/void-linux/void-packages/master/srcpkgs/linux/files/aarch64-dotconfig' ;;
+              *) ARCH_URL="" ;;
+            esac
+            if [ -n "$ARCH_URL" ]; then
+              echo "==> arm64 override for '$CHOICE': $ARCH_URL"
+              URL="$ARCH_URL"
+            else
+              echo "WARNING: no arm64-specific config for '$CHOICE'; using x86_64 config as-is" >&2
+            fi
+          fi
+
           echo "==> Source: distro '$CHOICE' -> $URL"
           curl -fSL "$URL" -o "$CONFIG_OUT" || { echo "ERROR: download $URL failed" >&2; exit 1; }
         fi
