@@ -62,11 +62,11 @@ on:
           - 'ubuntu'
           - 'void'
       config_custom:
-        description: '自定义配置路径或 URL'
+        description: '自定义配置路径或 URL（填了覆盖上面选项）'
         type: string
         default: ''
       respect_config:
-        description: '严格模式（跳过 olddefconfig）'
+        description: '严格模式：原样用 .config，跳过修补和 olddefconfig'
         type: boolean
         default: true
       include_headers:
@@ -74,7 +74,7 @@ on:
         type: boolean
         default: true
       headers_full_tree:
-        description: 'headers 完整源码树'
+        description: 'headers 完整源码树（关=仅最小子集）'
         type: boolean
         default: true
       strip_modules:
@@ -82,7 +82,7 @@ on:
         type: boolean
         default: false
       tarxz_include_headers:
-        description: 'tar.xz 包含 headers'
+        description: 'tar.xz 包含 headers 目录'
         type: boolean
         default: true
       parallel_jobs:
@@ -97,11 +97,11 @@ on:
           - '8'
           - '16'
       ccache:
-        description: '启用 ccache'
+        description: '启用 ccache 编译器缓存'
         type: boolean
         default: false
       lto_mode:
-        description: 'LTO 模式'
+        description: 'LLVM LTO 链接时优化'
         type: choice
         default: 'none'
         options:
@@ -109,7 +109,7 @@ on:
           - 'full'
           - 'thin'
       tune_profile:
-        description: '调优预设'
+        description: '调优预设（none=原版）'
         type: choice
         default: 'none'
         options:
@@ -120,15 +120,15 @@ on:
           - 'minimal'
           - 'debugoff'
       kernel_repo:
-        description: '内核源码仓库'
+        description: '内核源码仓库 URL'
         type: string
         default: 'https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux-stable.git'
       kernel_ref:
-        description: 'git 分支/标签'
+        description: 'git 分支或标签（留空=自动检测最新 stable）'
         type: string
         default: ''
       release_tag:
-        description: 'Release 标签（留空不发布）'
+        description: 'Release 标签（留空只上传制品不发布）'
         type: string
         default: ''
 
