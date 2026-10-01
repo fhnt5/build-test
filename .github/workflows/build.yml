@@ -255,7 +255,7 @@ jobs:
 
   publish:
     needs: build
-    if: inputs.release_tag != '' && !cancelled()
+    if: ${{ inputs.release_tag != '' && !cancelled() }}
     runs-on: ubuntu-latest
     concurrency:
       group: release-${{ inputs.release_tag }}
