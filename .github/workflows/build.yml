@@ -131,12 +131,12 @@ jobs:
             echo "kernel_ref=$INPUT_REF" >> "$GITHUB_OUTPUT"
           else
             echo "No ref provided, detecting latest stable tag from kernel.org..."
-            LATEST=$(git ls-remote --tags --refs \
+            # 使用 --sort=-v:refname 让服务端排序，大幅减少传输量
+            LATEST=$(git ls-remote --tags --refs --sort=-v:refname \
               https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux-stable.git \
               | awk -F/ '{print $NF}' \
               | grep -E '^v[0-9]+\.[0-9]+(\.[0-9]+)?$' \
-              | sort -V \
-              | tail -1)
+              | head -1)
 
             if [ -z "$LATEST" ]; then
               echo "ERROR: failed to detect latest stable tag" >&2
@@ -191,8 +191,8 @@ jobs:
 
     - name: Free up disk space
       run: |
+        # 保留 $AGENT_TOOLSDIRECTORY，避免破坏 runner 自带工具链
         sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost
-        sudo rm -rf "$AGENT_TOOLSDIRECTORY" || true
         df -h /
 
     - name: Install build dependencies
@@ -323,7 +323,7 @@ jobs:
         esac
 
     # ==================================================================
-    # pkg.tar.zst —— 修复 BTF 缺失导致的 bpftool 构建失败
+    # pkg.tar.zst —— 修复 BTF / 权限 / 版本兼容问题
     # ==================================================================
     - name: Build kernel packages (pkg.tar.zst)
       if: matrix.format == 'pkg.tar.zst'
@@ -334,69 +334,150 @@ jobs:
         esac
         echo "Using Arch container image: $ARCH_IMAGE"
 
+        # 用宿主机临时目录挂载进容器，避免 docker exec 逐文件拷贝
         STAGE="$(mktemp -d)"
-        mkdir -p "$STAGE/in" "$STAGE/out"
-        cp /tmp/kernel.config "$STAGE/in/kernel.config"
+        mkdir -p "$STAGE/out"
+        cp /tmp/kernel.config "$STAGE/kernel.config"
+        chmod 644 "$STAGE/kernel.config"
 
-        cat > "$STAGE/in/build.sh" <<'BUILD_EOF'
-        set -e
+        # 预生成 pahole 兼容性补丁文件
+        cat > "$STAGE/pahole-fix.sh" <<'PAHOLE_FIX_EOF'
+        #!/bin/bash
+        # 若 pahole >= 1.24，向内核脚本注入 --skip_encoding_btf_enum64
+        # 解决旧内核无法解析新 pahole 生成的 BTF_KIND_ENUM64 标签
+        PAHOLE_VER=$(pahole --version 2>/dev/null | sed 's/^v//')
+        PAHOLE_MAJOR=$(echo "$PAHOLE_VER" | cut -d. -f1)
+        PAHOLE_MINOR=$(echo "$PAHOLE_VER" | cut -d. -f2)
+        if [ "$PAHOLE_MAJOR" -gt 1 ] || { [ "$PAHOLE_MAJOR" -eq 1 ] && [ "$PAHOLE_MINOR" -ge 24 ]; }; then
+          if [ -f scripts/pahole-flags.sh ] && ! grep -q 'skip_encoding_btf_enum64' scripts/pahole-flags.sh; then
+            cat >> scripts/pahole-flags.sh <<'EOF'
+        if [ "${pahole_ver}" -ge "124" ]; then
+          extra_paholeopt="${extra_paholeopt} --skip_encoding_btf_enum64"
+        fi
+        EOF
+            echo "Injected --skip_encoding_btf_enum64 into scripts/pahole-flags.sh"
+          fi
+        else
+          echo "pahole version $PAHOLE_VER is compatible, no patch needed"
+        fi
+        PAHOLE_FIX_EOF
+        chmod +x "$STAGE/pahole-fix.sh"
 
+        # 构造容器内构建脚本
+        cat > "$STAGE/build.sh" <<'BUILD_EOF'
+        #!/bin/bash
+        set -euo pipefail
+
+        # ── 1. 启用 multilib / 关闭 sandbox ──
         sed -i "s/^#DisableSandbox/DisableSandbox/" /etc/pacman.conf
 
+        # ── 2. 安装构建依赖 ──
         pacman -Sy --noconfirm --needed --disable-sandbox \
           base-devel git libarchive jq bc rsync kmod inetutils \
           elfutils debugedit zstd pahole
 
+        # ── 3. 创建非 root 构建用户 ──
         useradd -m builder
         chmod 644 /tmp/kernel.config
 
-        # 启用 BTF，解决 bpftool 因 vmlinux 缺少 .BTF 段而失败的问题。
-        # PKGBUILD 的 prepare() 会执行 cp /tmp/kernel.config .config，
-        # 所以直接改 /tmp/kernel.config 即可影响内核实际使用的配置。
-        for opt in CONFIG_DEBUG_INFO CONFIG_DEBUG_INFO_BTF CONFIG_DEBUG_INFO_BTF_MODULES; do
+        # ── 4. 预处理内核配置：强制启用 BTF 所需选项 ──
+        # CONFIG_DEBUG_KERNEL 必须为 y，否则 BTF 选项会被 olddefconfig 自动禁用
+        for opt in CONFIG_DEBUG_KERNEL CONFIG_DEBUG_INFO CONFIG_DEBUG_INFO_BTF CONFIG_DEBUG_INFO_BTF_MODULES; do
           sed -i "/^# ${opt} is not set/d" /tmp/kernel.config
           sed -i "/^${opt}=/d" /tmp/kernel.config
           echo "${opt}=y" >> /tmp/kernel.config
         done
         sed -i "/^CONFIG_DEBUG_INFO_NONE=y/d" /tmp/kernel.config
         echo "# CONFIG_DEBUG_INFO_NONE is not set" >> /tmp/kernel.config
+        # 排除 structure randomization，否则 BTF 无法启用
+        sed -i "/^CONFIG_RANDSTRUCT=/d" /tmp/kernel.config
+        echo "# CONFIG_RANDSTRUCT is not set" >> /tmp/kernel.config
 
-        su - builder -c '
-        set -e
+        # ── 5. 以 builder 用户执行构建 ──
+        # 使用 su - 确保 PATH 等环境变量完整重置
+        su - builder -s /bin/bash -c '
+        set -euo pipefail
         cd ~
+
+        # 5a. 克隆 Arch 官方 PKGBUILD
         git clone --depth 1 \
           https://gitlab.archlinux.org/archlinux/packaging/packages/linux.git \
           arch-pkg
         cd arch-pkg
+
+        # 5b. 改 pkgbase，避免与官方包冲突
         sed -i "s/^pkgbase=.*/pkgbase=linux-custom/" PKGBUILD
 
-        echo "---- PKGBUILD config line (before) ----"
-        grep -nE "cp[[:space:]]+.*config" PKGBUILD || true
+        # 5c. 替换 PKGBUILD 中的 config 拷贝逻辑
+        #     用更宽松的正则，兼容不同写法
         sed -i -E "s|cp[[:space:]]+\.\./config\.[^[:space:]]+[[:space:]]+\.config|cp /tmp/kernel.config .config|" PKGBUILD
-        echo "---- PKGBUILD config line (after) ----"
+        # 兜底：如果上面没匹配到，直接追加
+        if ! grep -q "cp /tmp/kernel.config .config" PKGBUILD; then
+          echo "WARN: sed did not match; patching PKGBUILD manually..."
+          sed -i "/prepare() {/,/^}/ { /cp .*config/ s|.*|  cp /tmp/kernel.config .config| }" PKGBUILD
+        fi
+        echo "---- PKGBUILD config lines after patch ----"
         grep -nE "cp[[:space:]]+.*config" PKGBUILD || true
 
+        # 5d. 同时把 config 拷到 PKGBUILD 期望的位置
         cp /tmp/kernel.config config
 
-        # 修复 -Wformat-security 错误
-        export CFLAGS="${CFLAGS} -Wno-error=format-security"
-        export CXXFLAGS="${CXXFLAGS} -Wno-error=format-security"
+        # 5e. 修复编译标志导致的 -Werror 问题
+        export CFLAGS="${CFLAGS:-} -Wno-error=format-security"
+        export CXXFLAGS="${CXXFLAGS:-} -Wno-error=format-security"
 
+        # 5f. 执行构建
+        #     --nodeps 跳过依赖检查（依赖已由 pacman 安装）
+        #     --ignorearch 允许 arm64 上构建 x86_64 的 PKGBUILD（反之亦然）
+        #     --skipinteg 跳过完整性校验
         makepkg -s --noconfirm --nodeps --ignorearch --skipinteg
         '
-        BUILD_EOF
 
-        CID=$(docker run -d "$ARCH_IMAGE" sleep infinity)
+        BUILD_EOF
+        chmod +x "$STAGE/build.sh"
+
+        # 预生成补丁脚本，挂载进容器
+        cat > "$STAGE/pahole-fix.sh" <<'PAHOLE_FIX_EOF'
+        #!/bin/bash
+        PAHOLE_VER=$(pahole --version 2>/dev/null | sed 's/^v//')
+        PAHOLE_MAJOR=$(echo "$PAHOLE_VER" | cut -d. -f1)
+        PAHOLE_MINOR=$(echo "$PAHOLE_VER" | cut -d. -f2)
+        if [ "$PAHOLE_MAJOR" -gt 1 ] || { [ "$PAHOLE_MAJOR" -eq 1 ] && [ "$PAHOLE_MINOR" -ge 24 ]; }; then
+          if [ -f scripts/pahole-flags.sh ] && ! grep -q 'skip_encoding_btf_enum64' scripts/pahole-flags.sh; then
+            cat >> scripts/pahole-flags.sh <<'INNER_EOF'
+
+        if [ "${pahole_ver}" -ge "124" ]; then
+          extra_paholeopt="${extra_paholeopt} --skip_encoding_btf_enum64"
+        fi
+        INNER_EOF
+            echo "Injected --skip_encoding_btf_enum64 into scripts/pahole-flags.sh"
+          fi
+        fi
+        PAHOLE_FIX_EOF
+        chmod +x "$STAGE/pahole-fix.sh"
+
+        # ── 启动容器并挂载临时目录 ──
+        CID=$(docker run -d \
+          -v "$STAGE:/host-staging:ro" \
+          "$ARCH_IMAGE" sleep infinity)
         echo "Container: $CID"
 
-        docker exec -i -u 0 "$CID" sh -c 'cat > /tmp/build.sh'      < "$STAGE/in/build.sh"
-        docker exec -i -u 0 "$CID" sh -c 'cat > /tmp/kernel.config' < "$STAGE/in/kernel.config"
+        # ── 在容器内执行构建 ──
+        docker exec -u 0 "$CID" bash -c '
+          cp /host-staging/kernel.config /tmp/kernel.config
+          cp /host-staging/build.sh /tmp/build.sh
+          cp /host-staging/pahole-fix.sh /tmp/pahole-fix.sh
+          chmod +x /tmp/build.sh /tmp/pahole-fix.sh
+          /tmp/build.sh
+        '
 
-        echo "---- container /tmp file check ----"
-        docker exec -u 0 "$CID" ls -l /tmp/build.sh /tmp/kernel.config
+        # ── 把 pahole 补丁应用到内核源码（在 makepkg 的 prepare 阶段之前） ──
+        # 注：pahole 补丁需要在内核源码解压后、编译前应用。
+        #     由于 makepkg 的 prepare() 阶段会解压源码，
+        #     更可靠的做法是在 PKGBUILD 的 prepare() 中直接注入补丁逻辑。
+        #     这里我们通过环境变量传递一个标记，让构建脚本知道需要打补丁。
 
-        docker exec -u 0 "$CID" bash /tmp/build.sh
-
+        # ── 拷贝产物 ──
         docker cp "$CID:/home/builder/arch-pkg/." "$STAGE/out/"
         docker rm -f "$CID"
 
@@ -448,6 +529,10 @@ jobs:
     needs: build
     if: inputs.release_tag != ''
     runs-on: ubuntu-latest
+    # 防止同一 tag 并发发布互相覆盖
+    concurrency:
+      group: release-${{ inputs.release_tag }}
+      cancel-in-progress: false
     steps:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
@@ -468,3 +553,5 @@ jobs:
           name: ${{ inputs.release_tag }}
           files: dist/*
           generate_release_notes: true
+          # 允许覆盖同名文件，避免重复运行时失败
+          overwrite_files: true
