@@ -1,0 +1,470 @@
+name: Build Kernel
+
+on:
+  workflow_dispatch:
+    inputs:
+      # ─────────── x86_64 ───────────
+      x86_64_deb:
+        description: 'x86_64  ›  deb'
+        type: boolean
+        default: true
+      x86_64_rpm:
+        description: 'x86_64  ›  rpm'
+        type: boolean
+        default: false
+      x86_64_pkg:
+        description: 'x86_64  ›  pkg.tar.zst'
+        type: boolean
+        default: false
+      # ─────────── arm64 ───────────
+      arm64_deb:
+        description: 'arm64   ›  deb'
+        type: boolean
+        default: false
+      arm64_rpm:
+        description: 'arm64   ›  rpm'
+        type: boolean
+        default: false
+      arm64_pkg:
+        description: 'arm64   ›  pkg.tar.zst（使用 Arch Linux ARM 容器）'
+        type: boolean
+        default: false
+      # ─────────── 内核配置（下拉）───────────
+      config_choice:
+        description: '内核配置来源：default = 内核 defconfig；configs/* = 仓库文件；其他 = 发行版'
+        type: choice
+        required: true
+        default: 'default'
+        options:
+          - 'default'
+          - 'configs/G40_45.config'
+          - 'alma'
+          - 'alpine'
+          - 'arch'
+          - 'centos'
+          - 'debian'
+          - 'fedora'
+          - 'gentoo'
+          - 'kali'
+          - 'manjaro'
+          - 'nixos'
+          - 'opensuse'
+          - 'rhel'
+          - 'rocky'
+          - 'ubuntu'
+          - 'void'
+      config_custom:
+        description: '（可选）自定义配置：仓库内路径 / http(s):// URL。填了则覆盖上面的选择'
+        type: string
+        required: false
+        default: ''
+      # ─────────── 通用 ───────────
+      kernel_repo:
+        description: '内核源码仓库 URL'
+        required: true
+        default: 'https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux-stable.git'
+      kernel_ref:
+        description: '分支或 tag（如 v7.2.6 / master）。留空则自动使用最新 stable 版本'
+        required: false
+        default: ''
+      release_tag:
+        description: '（可选）完成后发布到该 tag 的 Release，留空则不发布'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+jobs:
+  # ------------------------------------------------------------------
+  # 作业 1：根据勾选生成动态矩阵
+  # ------------------------------------------------------------------
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.gen.outputs.matrix }}
+      count: ${{ steps.gen.outputs.count }}
+    steps:
+      - name: Generate build matrix
+        id: gen
+        run: |
+          MATRIX='{"include":[]}'
+          add() {
+            MATRIX=$(echo "$MATRIX" | jq -c --arg a "$1" --arg f "$2" \
+              '.include += [{arch:$a, format:$f}]')
+          }
+
+          if [ "${{ inputs.x86_64_deb }}" = "true" ]; then add x86_64 deb;        fi
+          if [ "${{ inputs.x86_64_rpm }}" = "true" ]; then add x86_64 rpm;        fi
+          if [ "${{ inputs.x86_64_pkg }}" = "true" ]; then add x86_64 pkg.tar.zst; fi
+          if [ "${{ inputs.arm64_deb }}"  = "true" ]; then add arm64  deb;        fi
+          if [ "${{ inputs.arm64_rpm }}"  = "true" ]; then add arm64  rpm;        fi
+          if [ "${{ inputs.arm64_pkg }}"  = "true" ]; then add arm64  pkg.tar.zst; fi
+
+          COUNT=$(echo "$MATRIX" | jq '.include | length')
+          echo "MATRIX = $MATRIX"
+          echo "COUNT  = $COUNT"
+
+          if [ "$COUNT" -eq 0 ]; then
+            echo "No build target selected. Please tick at least one architecture/format combination." >&2
+            exit 1
+          fi
+
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+          echo "count=$COUNT"   >> "$GITHUB_OUTPUT"
+
+  # ------------------------------------------------------------------
+  # 作业 2：解析最新 stable 版本号
+  # ------------------------------------------------------------------
+  resolve-ref:
+    runs-on: ubuntu-latest
+    outputs:
+      kernel_ref: ${{ steps.resolve.outputs.kernel_ref }}
+    steps:
+      - name: Resolve kernel ref
+        id: resolve
+        run: |
+          INPUT_REF="${{ inputs.kernel_ref }}"
+
+          if [ -n "$INPUT_REF" ]; then
+            echo "User provided ref: $INPUT_REF"
+            echo "kernel_ref=$INPUT_REF" >> "$GITHUB_OUTPUT"
+          else
+            echo "No ref provided, detecting latest stable tag from kernel.org..."
+            LATEST=$(git ls-remote --tags --refs \
+              https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux-stable.git \
+              | awk -F/ '{print $NF}' \
+              | grep -E '^v[0-9]+\.[0-9]+(\.[0-9]+)?$' \
+              | sort -V \
+              | tail -1)
+
+            if [ -z "$LATEST" ]; then
+              echo "ERROR: failed to detect latest stable tag" >&2
+              exit 1
+            fi
+            echo "Detected latest stable: $LATEST"
+            echo "kernel_ref=$LATEST" >> "$GITHUB_OUTPUT"
+          fi
+
+  # ------------------------------------------------------------------
+  # 作业 3：按矩阵构建
+  # ------------------------------------------------------------------
+  build:
+    needs: [prepare, resolve-ref]
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Show build target
+      run: |
+        echo "Arch:          ${{ matrix.arch }}"
+        echo "Format:        ${{ matrix.format }}"
+        echo "Repo:          ${{ inputs.kernel_repo }}"
+        echo "Ref:           ${{ needs.resolve-ref.outputs.kernel_ref }}"
+        echo "Config choice: ${{ inputs.config_choice }}"
+        echo "Config custom: ${{ inputs.config_custom }}"
+        echo "Runner:        ${{ runner.os }} / ${{ runner.arch }}"
+
+    - name: Set arch variables
+      id: arch
+      run: |
+        case "${{ matrix.arch }}" in
+          x86_64|amd64)
+            echo "karch=x86_64"    >> "$GITHUB_OUTPUT"
+            echo "deb_arch=amd64"  >> "$GITHUB_OUTPUT"
+            ;;
+          arm64|aarch64)
+            echo "karch=arm64"     >> "$GITHUB_OUTPUT"
+            echo "deb_arch=arm64"  >> "$GITHUB_OUTPUT"
+            ;;
+          *)
+            echo "Unsupported arch: ${{ matrix.arch }}" >&2
+            exit 1
+            ;;
+        esac
+
+    - name: Free up disk space
+      run: |
+        sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost
+        sudo rm -rf "$AGENT_TOOLSDIRECTORY" || true
+        df -h /
+
+    - name: Install build dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          build-essential libncurses-dev bison flex \
+          libssl-dev libelf-dev libdw-dev elfutils \
+          bc dwarves zstd cpio rsync kmod \
+          git jq curl
+
+        case "${{ matrix.format }}" in
+          deb)
+            sudo apt-get install -y debhelper fakeroot
+            ;;
+          rpm)
+            sudo apt-get install -y rpm rpm2cpio cpio
+            ;;
+        esac
+
+    - name: Clone kernel source
+      run: |
+        git clone --depth 1 --branch "${{ needs.resolve-ref.outputs.kernel_ref }}" \
+          "${{ inputs.kernel_repo }}" kernel-source
+
+    # ==================================================================
+    # 解析配置来源 + 应用到 .config
+    # ==================================================================
+    - name: Resolve and apply config
+      run: |
+        CHOICE="${{ inputs.config_choice }}"
+        CUSTOM="${{ inputs.config_custom }}"
+        KARCH="${{ steps.arch.outputs.karch }}"
+        CONFIG_OUT="/tmp/kernel.config"
+
+        if [ -n "$CUSTOM" ]; then
+          echo "==> config_custom provided, overriding choice: $CUSTOM"
+          CHOICE="$CUSTOM"
+        fi
+
+        if [ -z "$CHOICE" ] || [ "$CHOICE" = "default" ]; then
+          echo "==> Source: kernel defconfig (make defconfig)"
+          cd kernel-source
+          make ARCH="$KARCH" defconfig
+          cp .config "$CONFIG_OUT"
+          cd ..
+          echo "CONFIG_SOURCE=kernel defconfig" >> "$GITHUB_ENV"
+
+        elif [[ "$CHOICE" == http://* ]] || [[ "$CHOICE" == https://* ]]; then
+          echo "==> Source: download from URL: $CHOICE"
+          curl -fSL "$CHOICE" -o "$CONFIG_OUT"
+          echo "CONFIG_SOURCE=$CHOICE" >> "$GITHUB_ENV"
+
+        elif [ -f "$CHOICE" ]; then
+          echo "==> Source: repo file: $CHOICE"
+          cp "$CHOICE" "$CONFIG_OUT"
+          echo "CONFIG_SOURCE=$CHOICE" >> "$GITHUB_ENV"
+
+        elif [ -f "configs/$CHOICE" ]; then
+          echo "==> Source: repo file: configs/$CHOICE"
+          cp "configs/$CHOICE" "$CONFIG_OUT"
+          echo "CONFIG_SOURCE=configs/$CHOICE" >> "$GITHUB_ENV"
+
+        else
+          case "$CHOICE" in
+            alma)     URL='https://git.almalinux.org/rpms/kernel/-/raw/c9/f/kernel-x86_64-fedora.config' ;;
+            alpine)   URL='https://gitlab.alpinelinux.org/alpine/aports/-/raw/master/main/linux-lts/config-lts.x86_64' ;;
+            arch)     URL='https://gitlab.archlinux.org/archlinux/packaging/packages/linux/-/raw/main/config' ;;
+            centos)   URL='https://gitlab.com/redhat/centos-stream/rpms/kernel/-/raw/c9s/f/kernel-x86_64-fedora.config' ;;
+            debian)   URL='https://salsa.debian.org/kernel-team/linux/-/raw/debian/latest/debian/config/config' ;;
+            fedora)   URL='https://src.fedoraproject.org/rpms/kernel/raw/rawhide/f/kernel-x86_64-fedora.config' ;;
+            gentoo)   URL='https://gitweb.gentoo.org/proj/gentoo-kernel.git/plain/default_config' ;;
+            kali)     URL='https://gitlab.com/kalilinux/packages/linux/-/raw/kali/master/debian/config/config' ;;
+            manjaro)  URL='https://gitlab.manjaro.org/packages/core/linux/-/raw/master/config' ;;
+            nixos)    URL='https://raw.githubusercontent.com/NixOS/nixpkgs/master/pkgs/os-specific/linux/kernel/common-config.nix' ;;
+            opensuse) URL='https://raw.githubusercontent.com/openSUSE/kernel-source/master/config/x86_64/default' ;;
+            rhel)     URL='https://gitlab.com/redhat/centos-stream/rpms/kernel/-/raw/c9s/f/kernel-x86_64-fedora.config' ;;
+            rocky)    URL='https://git.rockylinux.org/rocky/kernel/-/raw/r9/f/kernel-x86_64-fedora.config' ;;
+            ubuntu)   URL='https://git.launchpad.net/~ubuntu-kernel/ubuntu/+source/linux/+git/jammy/plain/debian.master/config/amd64/config.flavour.generic' ;;
+            void)     URL='https://raw.githubusercontent.com/void-linux/void-packages/master/srcpkgs/linux/files/x86_64-dotconfig' ;;
+            *)
+              echo "Unknown config_choice: $CHOICE" >&2
+              echo "Pass a repo path (configs/...), an http(s) URL via config_custom, or one of:" >&2
+              echo "  alma alpine arch centos debian fedora gentoo kali manjaro nixos opensuse rhel rocky ubuntu void" >&2
+              exit 1
+              ;;
+          esac
+          echo "==> Source: distro '$CHOICE' -> $URL"
+          if ! curl -fSL "$URL" -o "$CONFIG_OUT"; then
+            echo "ERROR: failed to download $CHOICE config from $URL" >&2
+            echo "The URL may be stale. Update it in the workflow file, or use config_custom." >&2
+            exit 1
+          fi
+          echo "CONFIG_SOURCE=$CHOICE ($URL)" >> "$GITHUB_ENV"
+        fi
+
+        if [ ! -s "$CONFIG_OUT" ]; then
+          echo "ERROR: resolved config is empty: $CONFIG_OUT" >&2
+          exit 1
+        fi
+        echo "---- config preview (head) ----"
+        head -5 "$CONFIG_OUT"
+        echo "---- config lines: $(wc -l < "$CONFIG_OUT") ----"
+
+        cd kernel-source
+        cp "$CONFIG_OUT" .config
+        make ARCH="$KARCH" olddefconfig
+
+    - name: Build kernel packages (deb / rpm)
+      if: matrix.format != 'pkg.tar.zst'
+      run: |
+        cd kernel-source
+        case "${{ matrix.format }}" in
+          deb)
+            make ARCH=${{ steps.arch.outputs.karch }} \
+                 KDEB_ARCH=${{ steps.arch.outputs.deb_arch }} \
+                 KDEB_OPTS="-a${{ steps.arch.outputs.deb_arch }}" \
+                 DEB_EXCLUDE_PKG="linux-libc-dev linux-image-%-dbg" \
+                 -j$(nproc) bindeb-pkg
+            ;;
+          rpm)
+            make ARCH=${{ steps.arch.outputs.karch }} \
+                 KCFLAGS="-g0" \
+                 RPM_BUILD_NCPUS=$(nproc) \
+                 RPMOPTS="--define '_topdir $PWD/rpmbuild'" \
+                 -j$(nproc) binrpm-pkg
+            ;;
+        esac
+
+    # ==================================================================
+    # pkg.tar.zst —— 修复 BTF 缺失导致的 bpftool 构建失败
+    # ==================================================================
+    - name: Build kernel packages (pkg.tar.zst)
+      if: matrix.format == 'pkg.tar.zst'
+      run: |
+        case "${{ matrix.arch }}" in
+          x86_64) ARCH_IMAGE="archlinux:latest" ;;
+          arm64)  ARCH_IMAGE="menci/archlinuxarm:base-devel" ;;
+        esac
+        echo "Using Arch container image: $ARCH_IMAGE"
+
+        STAGE="$(mktemp -d)"
+        mkdir -p "$STAGE/in" "$STAGE/out"
+        cp /tmp/kernel.config "$STAGE/in/kernel.config"
+
+        cat > "$STAGE/in/build.sh" <<'BUILD_EOF'
+        set -e
+
+        sed -i "s/^#DisableSandbox/DisableSandbox/" /etc/pacman.conf
+
+        pacman -Sy --noconfirm --needed --disable-sandbox \
+          base-devel git libarchive jq bc rsync kmod inetutils \
+          elfutils debugedit zstd pahole
+
+        useradd -m builder
+        chmod 644 /tmp/kernel.config
+
+        # 启用 BTF，解决 bpftool 因 vmlinux 缺少 .BTF 段而失败的问题。
+        # PKGBUILD 的 prepare() 会执行 cp /tmp/kernel.config .config，
+        # 所以直接改 /tmp/kernel.config 即可影响内核实际使用的配置。
+        for opt in CONFIG_DEBUG_INFO CONFIG_DEBUG_INFO_BTF CONFIG_DEBUG_INFO_BTF_MODULES; do
+          sed -i "/^# ${opt} is not set/d" /tmp/kernel.config
+          sed -i "/^${opt}=/d" /tmp/kernel.config
+          echo "${opt}=y" >> /tmp/kernel.config
+        done
+        sed -i "/^CONFIG_DEBUG_INFO_NONE=y/d" /tmp/kernel.config
+        echo "# CONFIG_DEBUG_INFO_NONE is not set" >> /tmp/kernel.config
+
+        su - builder -c '
+        set -e
+        cd ~
+        git clone --depth 1 \
+          https://gitlab.archlinux.org/archlinux/packaging/packages/linux.git \
+          arch-pkg
+        cd arch-pkg
+        sed -i "s/^pkgbase=.*/pkgbase=linux-custom/" PKGBUILD
+
+        echo "---- PKGBUILD config line (before) ----"
+        grep -nE "cp[[:space:]]+.*config" PKGBUILD || true
+        sed -i -E "s|cp[[:space:]]+\.\./config\.[^[:space:]]+[[:space:]]+\.config|cp /tmp/kernel.config .config|" PKGBUILD
+        echo "---- PKGBUILD config line (after) ----"
+        grep -nE "cp[[:space:]]+.*config" PKGBUILD || true
+
+        cp /tmp/kernel.config config
+
+        # 修复 -Wformat-security 错误
+        export CFLAGS="${CFLAGS} -Wno-error=format-security"
+        export CXXFLAGS="${CXXFLAGS} -Wno-error=format-security"
+
+        makepkg -s --noconfirm --nodeps --ignorearch --skipinteg
+        '
+        BUILD_EOF
+
+        CID=$(docker run -d "$ARCH_IMAGE" sleep infinity)
+        echo "Container: $CID"
+
+        docker exec -i -u 0 "$CID" sh -c 'cat > /tmp/build.sh'      < "$STAGE/in/build.sh"
+        docker exec -i -u 0 "$CID" sh -c 'cat > /tmp/kernel.config' < "$STAGE/in/kernel.config"
+
+        echo "---- container /tmp file check ----"
+        docker exec -u 0 "$CID" ls -l /tmp/build.sh /tmp/kernel.config
+
+        docker exec -u 0 "$CID" bash /tmp/build.sh
+
+        docker cp "$CID:/home/builder/arch-pkg/." "$STAGE/out/"
+        docker rm -f "$CID"
+
+        sudo chown -R "$(id -u):$(id -g)" "$STAGE/out"
+
+        mkdir -p dist
+        find "$STAGE/out" -maxdepth 1 -type f -name '*.pkg.tar.zst' \
+          -exec mv {} dist/ \;
+        rm -rf "$STAGE"
+
+        echo "---- pkg artifacts ----"
+        ls -lh dist/
+        test -n "$(find dist -maxdepth 1 -type f -name '*.pkg.tar.zst' -print -quit)"
+
+    - name: Collect artifacts
+      run: |
+        mkdir -p dist
+
+        case "${{ matrix.format }}" in
+          deb)
+            find kernel-source/.. -maxdepth 1 -type f -name 'linux-image-*.deb' \
+              ! -name '*-dbg_*.deb' -exec mv {} dist/ \;
+            find kernel-source/.. -maxdepth 1 -type f -name 'linux-headers-*.deb' \
+              -exec mv {} dist/ \;
+            ;;
+          rpm)
+            find kernel-source/rpmbuild/RPMS -type f -name '*.rpm' \
+              -exec mv {} dist/ \;
+            ;;
+          pkg.tar.zst)
+            ;;
+        esac
+
+        echo "---- collected ----"
+        ls -lh dist/
+        test -n "$(find dist -maxdepth 1 -type f -print -quit)"
+
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: kernel-${{ matrix.format }}-${{ matrix.arch }}
+        path: dist/*
+        if-no-files-found: error
+
+  # ------------------------------------------------------------------
+  # 作业 4：发布 Release
+  # ------------------------------------------------------------------
+  publish:
+    needs: build
+    if: inputs.release_tag != ''
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: kernel-*
+          merge-multiple: true
+
+      - name: List collected files
+        run: |
+          ls -lh dist/
+          test -n "$(find dist -maxdepth 1 -type f -print -quit)"
+
+      - name: Publish to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.release_tag }}
+          name: ${{ inputs.release_tag }}
+          files: dist/*
+          generate_release_notes: true
