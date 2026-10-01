@@ -73,7 +73,7 @@ on:
         default: ''
       # ─────────── 调试开关 ───────────
       debug_verbose:
-        description: '开启 shell 逐行跟踪（set -x），日志会非常长'
+        description: '开启 shell 逐行跟踪（set -x），日志会非常长，全格式生效'
         type: boolean
         default: false
 
@@ -147,6 +147,84 @@ jobs:
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
+
+    # ==================================================================
+    # 生成共享日志分析脚本 —— 所有格式共用
+    # ==================================================================
+    - name: Create shared log analyzer
+      run: |
+        cat > /tmp/analyze-log.sh <<'ANALYZE_EOF'
+        #!/bin/bash
+        # usage: analyze-log.sh <logfile> <format> <arch>
+        LOG_FILE="$1"
+        FMT="$2"
+        ARCH="$3"
+
+        if [ ! -f "$LOG_FILE" ]; then
+          echo "WARN: analyze-log.sh: no log at $LOG_FILE"
+          exit 0
+        fi
+
+        # 大小写混合的错误/警告模式
+        ERR_PATTERN='([Ee][Rr][Rr][Oo][Rr]|[Ff][Aa][Tt][Aa][Ll]|[Ff][Aa][Ii][Ll][Ee][Dd]|undefined reference|multiple definition|No such file|not found|cannot find)'
+        WARN_PATTERN='([Ww][Aa][Rr][Nn][Ii][Nn][Gg]|deprecated|uninitialized|may be used|ignored without)'
+
+        ERR_LINES=$(grep -nE "$ERR_PATTERN" "$LOG_FILE" 2>/dev/null | head -500 || true)
+        WARN_LINES=$(grep -nE "$WARN_PATTERN" "$LOG_FILE" 2>/dev/null | head -500 || true)
+        ERR_CNT=$(printf '%s\n' "$ERR_LINES" | grep -c . || true)
+        WARN_CNT=$(printf '%s\n' "$WARN_LINES" | grep -c . || true)
+
+        echo ""
+        echo "╔════════════════════════════════════════════════════════════════╗"
+        echo "║  LOG ANALYSIS — ${FMT} / ${ARCH}"
+        echo "║  log file: ${LOG_FILE}"
+        echo "║  errors:   ${ERR_CNT}"
+        echo "║  warnings: ${WARN_CNT}"
+        echo "╚════════════════════════════════════════════════════════════════╝"
+        echo ""
+        echo "──────── ERRORS (with line numbers) ────────"
+        if [ "$ERR_CNT" -gt 0 ]; then printf '%s\n' "$ERR_LINES"; else echo "(none)"; fi
+        echo ""
+        echo "──────── WARNINGS (with line numbers) ────────"
+        if [ "$WARN_CNT" -gt 0 ]; then printf '%s\n' "$WARN_LINES"; else echo "(none)"; fi
+        echo ""
+
+        # ── Step Summary ──
+        {
+          echo "## Build Log Analysis — ${FMT} / \`${ARCH}\`"
+          echo ""
+          echo "Log file: \`${LOG_FILE}\`"
+          echo ""
+          echo "| Category | Count |"
+          echo "|---|---|"
+          echo "| Errors   | ${ERR_CNT} |"
+          echo "| Warnings | ${WARN_CNT} |"
+          echo ""
+          echo "### Errors (with line numbers)"
+          echo '```'
+          if [ "$ERR_CNT" -gt 0 ]; then printf '%s\n' "$ERR_LINES" | head -100; else echo "(none)"; fi
+          echo '```'
+          echo ""
+          echo "### Warnings (with line numbers)"
+          echo '```'
+          if [ "$WARN_CNT" -gt 0 ]; then printf '%s\n' "$WARN_LINES" | head -100; else echo "(none)"; fi
+          echo '```'
+        } >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
+
+        # ── Annotations ──
+        if [ "$ERR_CNT" -gt 0 ]; then
+          printf '%s\n' "$ERR_LINES" | head -10 | while IFS= read -r l; do
+            [ -n "$l" ] && echo "::error::${l}"
+          done
+        fi
+        if [ "$WARN_CNT" -gt 0 ]; then
+          printf '%s\n' "$WARN_LINES" | head -5 | while IFS= read -r l; do
+            [ -n "$l" ] && echo "::warning::${l}"
+          done
+        fi
+        ANALYZE_EOF
+        chmod +x /tmp/analyze-log.sh
+        echo "analyze-log.sh ready at /tmp/analyze-log.sh"
 
     - name: Show build target
       run: |
@@ -247,29 +325,61 @@ jobs:
         cp "$CONFIG_OUT" .config
         make ARCH="$KARCH" olddefconfig
 
+    # ==================================================================
+    # deb / rpm —— 带完整 debug 支持
+    # ==================================================================
     - name: Build kernel packages (deb / rpm)
       if: matrix.format != 'pkg.tar.zst'
+      env:
+        DEBUG_VERBOSE: ${{ inputs.debug_verbose }}
       run: |
+        set -uo pipefail
+        if [ "${DEBUG_VERBOSE}" = "true" ]; then set -x; fi
+
+        LOG="/tmp/build-${{ matrix.format }}-${{ matrix.arch }}.log"
+        mkdir -p dist-debug
+
         cd kernel-source
+
         case "${{ matrix.format }}" in
           deb)
             make ARCH=${{ steps.arch.outputs.karch }} \
                  KDEB_ARCH=${{ steps.arch.outputs.deb_arch }} \
                  KDEB_OPTS="-a${{ steps.arch.outputs.deb_arch }}" \
                  DEB_EXCLUDE_PKG="linux-libc-dev linux-image-%-dbg" \
-                 -j$(nproc) bindeb-pkg
+                 -j$(nproc) bindeb-pkg 2>&1 | tee "$LOG"
+            RC=${PIPESTATUS[0]}
             ;;
           rpm)
             make ARCH=${{ steps.arch.outputs.karch }} \
                  KCFLAGS="-g0" \
                  RPM_BUILD_NCPUS=$(nproc) \
                  RPMOPTS="--define '_topdir $PWD/rpmbuild'" \
-                 -j$(nproc) binrpm-pkg
+                 -j$(nproc) binrpm-pkg 2>&1 | tee "$LOG"
+            RC=${PIPESTATUS[0]}
+            ;;
+          *)
+            echo "Unknown format: ${{ matrix.format }}" >&2
+            exit 1
             ;;
         esac
 
+        echo "make exit code: $RC"
+
+        # 把日志留在工作目录，供后续 artifact 上传
+        cp "$LOG" "dist-debug/" 2>/dev/null || true
+
+        # 无论成功失败，主动分析
+        bash /tmp/analyze-log.sh "$LOG" "${{ matrix.format }}" "${{ matrix.arch }}"
+
+        if [ "$RC" -ne 0 ]; then
+          echo ""
+          echo "完整日志请下载 artifact: debug-log-${{ matrix.format }}-${{ matrix.arch }}"
+        fi
+        exit "$RC"
+
     # ==================================================================
-    # pkg.tar.zst —— YAML 语法已修正（所有 heredoc 内容缩进 8 格）
+    # pkg.tar.zst —— 容器内构建 + 完整 debug + 共享日志分析
     # ==================================================================
     - name: Build kernel packages (pkg.tar.zst)
       if: matrix.format == 'pkg.tar.zst'
@@ -290,16 +400,12 @@ jobs:
         chmod 644 "$STAGE/kernel.config"
 
         # ─────────────────────────────────────────────────────────────
-        # 生成 root-part.sh（容器内 root 身份执行）
-        # 注意：所有 heredoc 内容缩进 8 格，让 YAML 正确剥离
+        # root-part.sh（容器内 root 身份执行）
         # ─────────────────────────────────────────────────────────────
         cat > "$STAGE/root-part.sh" <<'ROOT_EOF'
         #!/bin/bash
         set -e
-
-        if [ "${DEBUG_VERBOSE:-false}" = "true" ]; then
-          set -x
-        fi
+        if [ "${DEBUG_VERBOSE:-false}" = "true" ]; then set -x; fi
 
         sed -i "s/^#DisableSandbox/DisableSandbox/" /etc/pacman.conf
 
@@ -324,16 +430,12 @@ jobs:
         chmod +x "$STAGE/root-part.sh"
 
         # ─────────────────────────────────────────────────────────────
-        # 生成 builder-part.sh（容器内 builder 身份执行）
+        # builder-part.sh（容器内 builder 身份执行）
         # ─────────────────────────────────────────────────────────────
         cat > "$STAGE/builder-part.sh" <<'BUILDER_EOF'
         #!/bin/bash
         set -uo pipefail
-
-        if [ "${DEBUG_VERBOSE:-false}" = "true" ]; then
-          set -x
-        fi
-
+        if [ "${DEBUG_VERBOSE:-false}" = "true" ]; then set -x; fi
         cd "$HOME"
 
         BTF_ENABLE="CONFIG_DEBUG_KERNEL CONFIG_DEBUG_INFO CONFIG_DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT CONFIG_DEBUG_INFO_BTF CONFIG_DEBUG_INFO_BTF_MODULES"
@@ -365,12 +467,11 @@ jobs:
             grep -q "^${opt}=y" "$f" || { echo "MISSING: ${opt}=y" >&2; fail=1; }
           done
           for opt in $BTF_DISABLE; do
-            grep -q "^${opt}=y" "$f" && { echo "BAD: ${opt}=y (blocks BTF)" >&2; fail=1; }
+            grep -q "^${opt}=y" "$f" && { echo "BAD: ${opt}=y" >&2; fail=1; }
           done
           return $fail
         }
 
-        # ── 1. 克隆 Arch PKGBUILD ──
         git clone --depth 1 \
           https://gitlab.archlinux.org/archlinux/packaging/packages/linux.git \
           arch-pkg
@@ -378,13 +479,11 @@ jobs:
 
         sed -i "s/^pkgbase=.*/pkgbase=linux-custom/" PKGBUILD
 
-        # ── 2. 替换 PKGBUILD 中的 config 拷贝 ──
         if grep -qE "cp[[:space:]]+\.\./config\.[^[:space:]]+[[:space:]]+\.config" PKGBUILD; then
           sed -i -E "s|cp[[:space:]]+\.\./config\.[^[:space:]]+[[:space:]]+\.config|cp /tmp/kernel.config .config|" PKGBUILD
         fi
         cp ~/kernel.config config
 
-        # ── 3. 阶段 A：只解压 + prepare ──
         echo ""
         echo "════════════ makepkg -o (prepare only) ════════════"
         makepkg -o --noconfirm --nodeps --ignorearch --skipinteg
@@ -392,10 +491,8 @@ jobs:
         SRC_DIR=$(find "$HOME/arch-pkg/src" -maxdepth 1 -type d -name 'linux-*' | head -1)
         echo "SRC_DIR=$SRC_DIR"
         [ -n "$SRC_DIR" ] || { echo "FATAL: no source dir" >&2; exit 1; }
-
         [ -f "$SRC_DIR/.config" ] || cp ~/kernel.config "$SRC_DIR/.config"
 
-        # ── 4. 诊断 + 修复 BTF 依赖链 ──
         echo ""
         echo "════════════ .config AFTER prepare() ════════════"
         dump_btf "$SRC_DIR/.config"
@@ -414,58 +511,44 @@ jobs:
         fi
         echo "BTF config OK."
 
-        # ── 5. pahole 兼容补丁 ──
         PAHOLE_FLAGS="$SRC_DIR/scripts/pahole-flags.sh"
         if [ -f "$PAHOLE_FLAGS" ] && ! grep -q 'skip_encoding_btf_enum64' "$PAHOLE_FLAGS"; then
           printf '\nif [ "${pahole_ver}" -ge "124" ]; then\n  extra_paholeopt="${extra_paholeopt} --skip_encoding_btf_enum64"\nfi\n' >> "$PAHOLE_FLAGS"
           echo "Injected --skip_encoding_btf_enum64"
         fi
 
-        # ── 6. 阶段 B：使用已准备源码构建 ──
         echo ""
         echo "════════════ makepkg -e (build only) ════════════"
         LOG="$HOME/arch-pkg/makepkg-build.log"
-        if ! makepkg -e --noconfirm --nodeps --ignorearch --skipinteg --keep 2>&1 | tee "$LOG"; then
-          rc=${PIPESTATUS[0]}
-          echo ""
-          echo "════════════════════════════════════════════════════════════"
-          echo "              BUILD FAILED — DIAGNOSTICS"
-          echo "════════════════════════════════════════════════════════════"
-          echo "[1] .config BTF lines (with line numbers):"
-          grep -nE 'DEBUG_INFO|BTF|RANDSTRUCT|DEBUG_KERNEL' "$SRC_DIR/.config" || echo "(none)"
-          echo ""
-          echo "[2] vmlinux .BTF section check:"
-          if [ -f "$SRC_DIR/vmlinux" ]; then
-            ls -lh "$SRC_DIR/vmlinux"
-            readelf -S "$SRC_DIR/vmlinux" 2>/dev/null | grep -i BTF || echo "(NO .BTF SECTION)"
-          else
-            echo "(no vmlinux)"
-          fi
-          echo ""
-          echo "[3] Error/Warning lines with line numbers:"
-          grep -niE 'error|warning|failed|fatal' "$LOG" | tail -80 || echo "(none)"
-          echo ""
-          echo "[4] pahole version:"
-          pahole --version 2>&1 || true
-          echo ""
-          echo "[5] log tail (last 80 lines):"
-          tail -80 "$LOG" || true
-          echo ""
-          echo "[6] SRC_DIR listing:"
-          ls -la "$SRC_DIR" | head -40 || true
-          echo ""
-          echo "[7] PKGBUILD prepare() function:"
-          awk '/^prepare\(\)/,/^}/' "$HOME/arch-pkg/PKGBUILD" || true
-          echo "════════════════════════════════════════════════════════════"
-          exit "${rc:-1}"
-        fi
+        makepkg -e --noconfirm --nodeps --ignorearch --skipinteg --keep 2>&1 | tee "$LOG"
+        rc=${PIPESTATUS[0]}
 
-        echo "makepkg -e OK."
+        echo ""
+        echo "════════════════ CONTAINER-SIDE DIAGNOSTICS ════════════════"
+        echo "[1] .config BTF lines:"
+        grep -nE 'DEBUG_INFO|BTF|RANDSTRUCT|DEBUG_KERNEL' "$SRC_DIR/.config" || echo "(none)"
+        echo ""
+        echo "[2] vmlinux .BTF section:"
+        if [ -f "$SRC_DIR/vmlinux" ]; then
+          ls -lh "$SRC_DIR/vmlinux"
+          readelf -S "$SRC_DIR/vmlinux" 2>/dev/null | grep -i BTF || echo "(NO .BTF SECTION)"
+        else
+          echo "(no vmlinux)"
+        fi
+        echo ""
+        echo "[3] pahole version:"
+        pahole --version 2>&1 || true
+        echo ""
+        echo "[4] PKGBUILD prepare() function:"
+        awk '/^prepare\(\)/,/^}/' "$HOME/arch-pkg/PKGBUILD" || true
+        echo "════════════════════════════════════════════════════════════"
+
+        exit "${rc:-1}"
         BUILDER_EOF
         chmod +x "$STAGE/builder-part.sh"
 
         # ─────────────────────────────────────────────────────────────
-        # 启动容器并执行
+        # 启动容器并执行（宿主机侧 tee 全部输出）
         # ─────────────────────────────────────────────────────────────
         CID=$(docker run -d \
           -e DEBUG_VERBOSE="${DEBUG_VERBOSE}" \
@@ -473,6 +556,7 @@ jobs:
           "$ARCH_IMAGE" sleep infinity)
         echo "Container ID: $CID"
 
+        LOG="/tmp/build-pkg.tar.zst-${{ matrix.arch }}.log"
         set +e
         docker exec -u 0 -e DEBUG_VERBOSE="${DEBUG_VERBOSE}" "$CID" bash -c '
           cp /host-staging/kernel.config   /tmp/kernel.config
@@ -481,31 +565,41 @@ jobs:
           chmod 644 /tmp/kernel.config
           chmod +x /tmp/root-part.sh /tmp/builder-part.sh
           /tmp/root-part.sh
-        '
-        RC=$?
+        ' 2>&1 | tee "$LOG"
+        RC=${PIPESTATUS[0]}
         set -e
-        echo "Container build exit code: $RC"
+        echo "Container exit code: $RC"
 
-        # ── 尽量拷回产物和日志 ──
-        docker cp "$CID:/home/builder/arch-pkg/." "$STAGE/out/" 2>/dev/null || true
+        # ── 拷回产物和日志 ──
         docker cp "$CID:/home/builder/arch-pkg/makepkg-build.log" \
           "$STAGE/out/makepkg-build.log" 2>/dev/null || true
+        docker cp "$CID:/home/builder/arch-pkg/." "$STAGE/out/" 2>/dev/null || true
         docker rm -f "$CID" >/dev/null 2>&1 || true
-
         sudo chown -R "$(id -u):$(id -g)" "$STAGE/out" 2>/dev/null || true
 
         mkdir -p dist dist-debug
         find "$STAGE/out" -maxdepth 1 -type f -name '*.pkg.tar.zst' -exec mv {} dist/ \;
-        [ -f "$STAGE/out/makepkg-build.log" ] && cp "$STAGE/out/makepkg-build.log" dist-debug/ || true
+        # 保存宿主机侧完整日志（含容器所有输出）
+        cp "$LOG" dist-debug/ 2>/dev/null || true
+        # 保存容器内 makepkg 日志（补充）
+        [ -f "$STAGE/out/makepkg-build.log" ] && \
+          cp "$STAGE/out/makepkg-build.log" dist-debug/ 2>/dev/null || true
+
+        # ── 共享分析器：无论成败都执行 ──
+        bash /tmp/analyze-log.sh "$LOG" "${{ matrix.format }}" "${{ matrix.arch }}"
 
         if [ "$RC" -ne 0 ]; then
-          echo "──── dist/ contents ────"
+          echo ""
+          echo "──── partial artifacts in dist/ ────"
           ls -lh dist/ || true
+          echo ""
+          echo "完整日志请下载 artifact: debug-log-${{ matrix.format }}-${{ matrix.arch }}"
           rm -rf "$STAGE"
           exit "$RC"
         fi
 
         rm -rf "$STAGE"
+        echo ""
         echo "──── pkg artifacts ────"
         ls -lh dist/
         test -n "$(find dist -maxdepth 1 -type f -name '*.pkg.tar.zst' -print -quit)"
@@ -531,7 +625,7 @@ jobs:
         echo "──── collected ────"
         ls -lh dist/ || true
 
-    - name: Upload artifacts
+    - name: Upload kernel artifacts
       if: always() && !cancelled() && hashFiles('dist/**') != ''
       uses: actions/upload-artifact@v4
       with:
@@ -540,11 +634,12 @@ jobs:
         if-no-files-found: warn
         retention-days: 7
 
-    - name: Upload debug log (pkg only)
-      if: always() && !cancelled() && matrix.format == 'pkg.tar.zst' && hashFiles('dist-debug/**') != ''
+    # 所有格式都上传 debug 日志
+    - name: Upload debug logs (all formats)
+      if: always() && !cancelled() && hashFiles('dist-debug/**') != ''
       uses: actions/upload-artifact@v4
       with:
-        name: debug-makepkg-${{ matrix.arch }}
+        name: debug-log-${{ matrix.format }}-${{ matrix.arch }}
         path: dist-debug/*
         if-no-files-found: warn
         retention-days: 7
