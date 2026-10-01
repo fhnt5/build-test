@@ -4,35 +4,35 @@ on:
   workflow_dispatch:
     inputs:
       x86_64_deb:
-        description: 'x86_64  ›  deb'
+        description: 'x86_64 deb'
         type: boolean
         default: true
       x86_64_rpm:
-        description: 'x86_64  ›  rpm'
+        description: 'x86_64 rpm'
         type: boolean
         default: false
       x86_64_tarxz:
-        description: 'x86_64  ›  tar.xz'
+        description: 'x86_64 tar.xz'
         type: boolean
         default: false
       x86_64_pkg:
-        description: 'x86_64  ›  pkg.tar.zst'
+        description: 'x86_64 pkg.tar.zst'
         type: boolean
         default: false
       arm64_deb:
-        description: 'arm64  ›  deb'
+        description: 'arm64 deb'
         type: boolean
         default: false
       arm64_rpm:
-        description: 'arm64  ›  rpm'
+        description: 'arm64 rpm'
         type: boolean
         default: false
       arm64_tarxz:
-        description: 'arm64  ›  tar.xz'
+        description: 'arm64 tar.xz'
         type: boolean
         default: false
       arm64_pkg:
-        description: 'arm64  ›  pkg.tar.zst'
+        description: 'arm64 pkg.tar.zst'
         type: boolean
         default: false
       config_choice:
@@ -63,32 +63,32 @@ on:
           - 'ubuntu'
           - 'void'
       config_custom:
-        description: 'Custom config path/URL (overrides above)'
+        description: 'Custom config path/URL'
         type: string
         required: false
         default: ''
       respect_config:
-        description: 'Strict .config (skip olddefconfig)'
+        description: 'Strict .config'
         type: boolean
         default: true
       include_headers:
-        description: 'Build headers packages'
+        description: 'Build headers'
         type: boolean
         default: true
       headers_full_tree:
-        description: 'Full source tree in headers'
+        description: 'Full headers tree'
         type: boolean
         default: true
       strip_modules:
-        description: 'Strip module symbols'
+        description: 'Strip modules'
         type: boolean
         default: false
       tarxz_include_headers:
-        description: 'Include headers in tar.xz'
+        description: 'Headers in tar.xz'
         type: boolean
         default: true
       parallel_jobs:
-        description: 'Parallel jobs (-j)'
+        description: 'Parallel jobs'
         type: choice
         required: false
         default: 'auto'
@@ -104,7 +104,7 @@ on:
         type: boolean
         default: false
       lto_clang:
-        description: 'LLVM LTO (full)'
+        description: 'LLVM LTO full'
         type: boolean
         default: false
       thin_lto:
@@ -120,27 +120,30 @@ on:
         type: boolean
         default: false
       low_latency:
-        description: 'Low latency tuning'
+        description: 'Low latency'
         type: boolean
         default: false
       debug_off:
-        description: 'Disable all debug/tracing'
+        description: 'Disable all debug'
         type: boolean
         default: false
       size_optimize:
-        description: 'Size optimization (-Os)'
+        description: 'Size optimize'
         type: boolean
         default: false
       kernel_repo:
-        description: 'Kernel source repo URL'
+        description: 'Kernel repo URL'
+        type: string
         required: true
         default: 'https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux-stable.git'
       kernel_ref:
         description: 'Branch/tag (empty=auto)'
+        type: string
         required: false
         default: ''
       release_tag:
-        description: 'Release tag (empty=no release)'
+        description: 'Release tag'
+        type: string
         required: false
         default: ''
 
@@ -172,7 +175,7 @@ jobs:
             X86_FORMATS=$(echo "$X86_FORMATS" | jq -c '. + ["pkg"]')
           fi
           if [ "$(echo "$X86_FORMATS" | jq 'length')" -gt 0 ]; then
-            MATRIX=$(echo "$MATRIX" | jq -c --argjson f "$X86_FORMATS" '.include += [{arch:"x86_64", formats:$f}]')
+            MATRIX=$(echo "$MATRIX" | jq -c --argjson f "$X86_FORMATS" '.include += [{"arch":"x86_64","formats":$f}]')
           fi
           ARM_FORMATS="[]"
           if [ "${{ inputs.arm64_deb }}" = "true" ]; then
@@ -188,7 +191,7 @@ jobs:
             ARM_FORMATS=$(echo "$ARM_FORMATS" | jq -c '. + ["pkg"]')
           fi
           if [ "$(echo "$ARM_FORMATS" | jq 'length')" -gt 0 ]; then
-            MATRIX=$(echo "$MATRIX" | jq -c --argjson f "$ARM_FORMATS" '.include += [{arch:"arm64", formats:$f}]')
+            MATRIX=$(echo "$MATRIX" | jq -c --argjson f "$ARM_FORMATS" '.include += [{"arch":"arm64","formats":$f}]')
           fi
           COUNT=$(echo "$MATRIX" | jq '.include | length')
           echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
@@ -243,511 +246,513 @@ jobs:
 
   build:
     needs: [prepare, resolve-ref]
-    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
+    runs-on: ${{ matrix.arch == 'arm64' && fromJSON('"ubuntu-24.04-arm"') || 'ubuntu-latest' }}
     timeout-minutes: 360
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
-
     steps:
-    - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-    - name: Set arch variables
-      id: arch
-      run: |
-        case "${{ matrix.arch }}" in
-          x86_64|amd64)
-            echo "karch=x86_64" >> "$GITHUB_OUTPUT"
-            echo "deb_arch=amd64" >> "$GITHUB_OUTPUT"
-            echo "rpm_arch=x86_64" >> "$GITHUB_OUTPUT"
-            echo "arch_boot=arch/x86/boot/bzImage" >> "$GITHUB_OUTPUT"
-            ;;
-          arm64|aarch64)
-            echo "karch=arm64" >> "$GITHUB_OUTPUT"
-            echo "deb_arch=arm64" >> "$GITHUB_OUTPUT"
-            echo "rpm_arch=aarch64" >> "$GITHUB_OUTPUT"
-            echo "arch_boot=arch/arm64/boot/Image" >> "$GITHUB_OUTPUT"
-            ;;
-          *)
-            echo "Unsupported arch" >&2
-            exit 1
-            ;;
-        esac
-
-    - name: Free disk space
-      run: |
-        sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost
-        df -h /
-
-    - name: Install build dependencies
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y build-essential libncurses-dev bison flex \
-          libssl-dev libelf-dev libdw-dev elfutils bc dwarves zstd cpio \
-          rsync kmod xz-utils dpkg-dev rpm git jq curl ccache \
-          clang lld llvm
-
-    - name: Clone kernel source
-      run: |
-        set -euo pipefail
-        REF="${{ needs.resolve-ref.outputs.kernel_ref }}"
-        REPO="${{ inputs.kernel_repo }}"
-        if ! git clone --depth 1 --branch "$REF" "$REPO" kernel-source; then
-          rm -rf kernel-source
-          git clone --branch "$REF" "$REPO" kernel-source
-        fi
-
-    - name: Resolve and apply config
-      run: |
-        set -euo pipefail
-        CHOICE="${{ inputs.config_choice }}"
-        CUSTOM="${{ inputs.config_custom }}"
-        KARCH="${{ steps.arch.outputs.karch }}"
-        CONFIG_OUT="/tmp/kernel.config"
-
-        if [ -n "$CUSTOM" ]; then
-          CHOICE="$CUSTOM"
-        fi
-
-        if echo "$CHOICE" | grep -qE '^https?://'; then
-          curl -fSL "$CHOICE" -o "$CONFIG_OUT"
-        elif echo "$CHOICE" | grep -qE '^make:'; then
-          TARGET="${CHOICE#make:}"
-          cd kernel-source
-          make ARCH="$KARCH" "$TARGET"
-          cp .config "$CONFIG_OUT"
-          cd ..
-        elif [ -f "$CHOICE" ]; then
-          cp "$CHOICE" "$CONFIG_OUT"
-        elif [ -f "configs/$CHOICE" ]; then
-          cp "configs/$CHOICE" "$CONFIG_OUT"
-        elif echo "$CHOICE" | grep -qE '^(default|allyesconfig|allmodconfig|allnoconfig|tinyconfig)$'; then
-          cd kernel-source
-          make ARCH="$KARCH" "$CHOICE"
-          cp .config "$CONFIG_OUT"
-          cd ..
-        else
-          case "$CHOICE" in
-            alma)     URL='https://git.almalinux.org/rpms/kernel/-/raw/c9/f/kernel-x86_64-fedora.config' ;;
-            alpine)   URL='https://gitlab.alpinelinux.org/alpine/aports/-/raw/master/main/linux-lts/config-lts.x86_64' ;;
-            arch)     URL='https://gitlab.archlinux.org/archlinux/packaging/packages/linux/-/raw/main/config' ;;
-            centos)   URL='https://gitlab.com/redhat/centos-stream/rpms/kernel/-/raw/c9s/f/kernel-x86_64-fedora.config' ;;
-            debian)   URL='https://salsa.debian.org/kernel-team/linux/-/raw/debian/latest/debian/config/config' ;;
-            fedora)   URL='https://src.fedoraproject.org/rpms/kernel/raw/rawhide/f/kernel-x86_64-fedora.config' ;;
-            gentoo)   URL='https://gitweb.gentoo.org/proj/gentoo-kernel.git/plain/default_config' ;;
-            kali)     URL='https://gitlab.com/kalilinux/packages/linux/-/raw/kali/master/debian/config/config' ;;
-            manjaro)  URL='https://gitlab.manjaro.org/packages/core/linux/-/raw/master/config' ;;
-            nixos)    URL='https://raw.githubusercontent.com/NixOS/nixpkgs/master/pkgs/os-specific/linux/kernel/common-config.nix' ;;
-            opensuse) URL='https://raw.githubusercontent.com/openSUSE/kernel-source/master/config/x86_64/default' ;;
-            rhel)     URL='https://gitlab.com/redhat/centos-stream/rpms/kernel/-/raw/c9s/f/kernel-x86_64-fedora.config' ;;
-            rocky)    URL='https://git.rockylinux.org/rocky/kernel/-/raw/r9/f/kernel-x86_64-fedora.config' ;;
-            ubuntu)   URL='https://git.launchpad.net/~ubuntu-kernel/ubuntu/+source/linux/+git/jammy/plain/debian.master/config/amd64/config.flavour.generic' ;;
-            void)     URL='https://raw.githubusercontent.com/void-linux/void-packages/master/srcpkgs/linux/files/x86_64-dotconfig' ;;
-            *) echo "Unknown: $CHOICE" >&2; exit 1 ;;
+      - name: Set arch variables
+        id: arch
+        run: |
+          case "${{ matrix.arch }}" in
+            x86_64|amd64)
+              echo "karch=x86_64" >> "$GITHUB_OUTPUT"
+              echo "deb_arch=amd64" >> "$GITHUB_OUTPUT"
+              echo "rpm_arch=x86_64" >> "$GITHUB_OUTPUT"
+              echo "arch_boot=arch/x86/boot/bzImage" >> "$GITHUB_OUTPUT"
+              ;;
+            arm64|aarch64)
+              echo "karch=arm64" >> "$GITHUB_OUTPUT"
+              echo "deb_arch=arm64" >> "$GITHUB_OUTPUT"
+              echo "rpm_arch=aarch64" >> "$GITHUB_OUTPUT"
+              echo "arch_boot=arch/arm64/boot/Image" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "Unsupported arch" >&2
+              exit 1
+              ;;
           esac
-          if [ "$KARCH" = "arm64" ]; then
-            case "$CHOICE" in
-              alma|centos|fedora|rhel|rocky)
-                URL='https://git.almalinux.org/rpms/kernel/-/raw/c9/f/kernel-aarch64-fedora.config' ;;
-              alpine)
-                URL='https://gitlab.alpinelinux.org/alpine/aports/-/raw/master/main/linux-lts/config-lts.aarch64' ;;
-              opensuse)
-                URL='https://raw.githubusercontent.com/openSUSE/kernel-source/master/config/arm64/default' ;;
-              ubuntu)
-                URL='https://git.launchpad.net/~ubuntu-kernel/ubuntu/+source/linux/+git/jammy/plain/debian.master/config/arm64/config.flavour.generic' ;;
-              void)
-                URL='https://raw.githubusercontent.com/void-linux/void-packages/master/srcpkgs/linux/files/aarch64-dotconfig' ;;
-            esac
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost
+          df -h /
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libncurses-dev bison flex \
+            libssl-dev libelf-dev libdw-dev elfutils bc dwarves zstd cpio \
+            rsync kmod xz-utils dpkg-dev rpm git jq curl ccache \
+            clang lld llvm
+
+      - name: Clone kernel source
+        run: |
+          set -euo pipefail
+          REF="${{ needs.resolve-ref.outputs.kernel_ref }}"
+          REPO="${{ inputs.kernel_repo }}"
+          if ! git clone --depth 1 --branch "$REF" "$REPO" kernel-source; then
+            rm -rf kernel-source
+            git clone --branch "$REF" "$REPO" kernel-source
           fi
-          curl -fSL "$URL" -o "$CONFIG_OUT"
-        fi
 
-        cd kernel-source
-        cp "$CONFIG_OUT" .config
+      - name: Resolve and apply config
+        run: |
+          set -euo pipefail
+          CHOICE="${{ inputs.config_choice }}"
+          CUSTOM="${{ inputs.config_custom }}"
+          KARCH="${{ steps.arch.outputs.karch }}"
+          CONFIG_OUT="/tmp/kernel.config"
 
-        if [ "${{ inputs.respect_config }}" != "true" ]; then
-          sed -i '/^CONFIG_LD_ORPHAN_WARN_LEVEL=/d' .config
-          echo 'CONFIG_LD_ORPHAN_WARN_LEVEL="warn"' >> .config
-          make ARCH="$KARCH" olddefconfig </dev/null
-        fi
+          if [ -n "$CUSTOM" ]; then
+            CHOICE="$CUSTOM"
+          fi
 
-    - name: Apply optimization tweaks
-      run: |
-        set -euo pipefail
-        cd kernel-source
-        KARCH="${{ steps.arch.outputs.karch }}"
-
-        TWEAKED=false
-
-        if [ "${{ inputs.disable_log_spam }}" = "true" ]; then
-          TWEAKED=true
-          for c in DEBUG_BUGVERBOSE DEBUG_LIST DEBUG_SG DEBUG_NOTIFIERS DEBUG_CREDENTIALS \
-                    RCU_TRACE SCHED_DEBUG PRINTK_TIME DYNAMIC_DEBUG DEBUG_ATOMIC_SLEEP \
-                    DEBUG_PREEMPT DEBUG_SPINLOCK DEBUG_MUTEXES DEBUG_RT_MUTEXES \
-                    DEBUG_WW_MUTEX_SLOWPATH DEBUG_LOCK_ALLOC DEBUG_LOCKDEP \
-                    DEBUG_KOBJECT DEBUG_KOBJECT_RELEASE; do
-            sed -i "/^CONFIG_${c}=/d" .config
-            echo "# CONFIG_${c} is not set" >> .config
-          done
-        fi
-
-        if [ "${{ inputs.performance_tune }}" = "true" ]; then
-          TWEAKED=true
-          for c in NO_HZ_FULL RCU_NOCBS PREEMPT_DYNAMIC CPU_FREQ_DEFAULT_GOV_PERFORMANCE; do
-            sed -i "/^CONFIG_${c}=/d" .config
-            echo "CONFIG_${c}=y" >> .config
-          done
-          for c in MITIGATION_RETPOLINE MITIGATION_SPECTRE_BHI MITIGATION_IBPB_ENTRY \
-                    MITIGATION_IBRS_ENTRY MITIGATION_L1TF MITIGATION_PTI; do
-            sed -i "/^CONFIG_${c}=/d" .config
-            echo "# CONFIG_${c} is not set" >> .config
-          done
-          sed -i '/^CONFIG_CPU_FREQ_DEFAULT_GOV_ONDEMAND=/d' .config
-          echo "# CONFIG_CPU_FREQ_DEFAULT_GOV_ONDEMAND is not set" >> .config
-        fi
-
-        if [ "${{ inputs.low_latency }}" = "true" ]; then
-          TWEAKED=true
-          sed -i '/^CONFIG_PREEMPT=/d' .config
-          sed -i '/^CONFIG_PREEMPT_VOLUNTARY=/d' .config
-          sed -i '/^CONFIG_PREEMPT_NONE=/d' .config
-          echo "CONFIG_PREEMPT=y" >> .config
-          sed -i '/^CONFIG_HZ_250=/d' .config
-          sed -i '/^CONFIG_HZ_300=/d' .config
-          sed -i '/^CONFIG_HZ_100=/d' .config
-          echo "CONFIG_HZ_1000=y" >> .config
-          sed -i '/^CONFIG_RCU_BOOST=/d' .config
-          echo "CONFIG_RCU_BOOST=y" >> .config
-        fi
-
-        if [ "${{ inputs.debug_off }}" = "true" ]; then
-          TWEAKED=true
-          for c in KASAN KMSAN KCSAN KFENCE KMEMLEAK DEBUG_INFO DWARF_TOOLCHAIN_DEFAULT \
-                    FTRACE FUNCTION_TRACER FUNCTION_GRAPH_TRACER STACK_TRACER \
-                    KPROBES UPROBES TRACEPOINTS DEBUG_FS SLUB_DEBUG \
-                    DEBUG_PAGEALLOC DEBUG_KMEMLEAK DEBUG_STACK_USAGE \
-                    SCHEDSTATS LATENCYTOP LOCK_STAT; do
-            sed -i "/^CONFIG_${c}=/d" .config
-            echo "# CONFIG_${c} is not set" >> .config
-          done
-        fi
-
-        if [ "${{ inputs.size_optimize }}" = "true" ]; then
-          TWEAKED=true
-          sed -i '/^CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE=/d' .config
-          echo "CONFIG_CC_OPTIMIZE_FOR_SIZE=y" >> .config
-          for c in MODULE_SIG MODULE_SIG_ALL MODULE_SIG_FORCE; do
-            sed -i "/^CONFIG_${c}=/d" .config
-            echo "# CONFIG_${c} is not set" >> .config
-          done
-        fi
-
-        if [ "$TWEAKED" = "true" ] && [ "${{ inputs.respect_config }}" != "true" ]; then
-          make ARCH="$KARCH" olddefconfig </dev/null
-        fi
-
-    - name: Compile kernel
-      run: |
-        set -euo pipefail
-        cd kernel-source
-        KARCH="${{ steps.arch.outputs.karch }}"
-
-        JOBS="${{ inputs.parallel_jobs }}"
-        if [ "$JOBS" = "auto" ]; then
-          JOBS=$(nproc)
-        fi
-
-        MAKE_ARGS="ARCH=$KARCH -j$JOBS"
-
-        if [ "${{ inputs.ccache }}" = "true" ]; then
-          export PATH="/usr/lib/ccache:$PATH"
-          export CC="ccache gcc"
-          export HOSTCC="ccache gcc"
-        fi
-
-        if [ "${{ inputs.lto_clang }}" = "true" ] || [ "${{ inputs.thin_lto }}" = "true" ]; then
-          MAKE_ARGS="$MAKE_ARGS LLVM=1"
-          if [ "${{ inputs.lto_clang }}" = "true" ]; then
-            sed -i '/^CONFIG_LTO=/d' .config
-            echo "CONFIG_LTO=y" >> .config
-            sed -i '/^CONFIG_LTO_CLANG_FULL=/d' .config
-            echo "CONFIG_LTO_CLANG_FULL=y" >> .config
-            sed -i '/^CONFIG_LTO_NONE=/d' .config
-            echo "# CONFIG_LTO_NONE is not set" >> .config
+          if echo "$CHOICE" | grep -qE '^https?://'; then
+            curl -fSL "$CHOICE" -o "$CONFIG_OUT"
+          elif echo "$CHOICE" | grep -qE '^make:'; then
+            TARGET="${CHOICE#make:}"
+            cd kernel-source
+            make ARCH="$KARCH" "$TARGET"
+            cp .config "$CONFIG_OUT"
+            cd ..
+          elif [ -f "$CHOICE" ]; then
+            cp "$CHOICE" "$CONFIG_OUT"
+          elif [ -f "configs/$CHOICE" ]; then
+            cp "configs/$CHOICE" "$CONFIG_OUT"
+          elif echo "$CHOICE" | grep -qE '^(default|allyesconfig|allmodconfig|allnoconfig|tinyconfig)$'; then
+            cd kernel-source
+            make ARCH="$KARCH" "$CHOICE"
+            cp .config "$CONFIG_OUT"
+            cd ..
           else
-            sed -i '/^CONFIG_LTO=/d' .config
-            echo "CONFIG_LTO=y" >> .config
-            sed -i '/^CONFIG_LTO_CLANG_THIN=/d' .config
-            echo "CONFIG_LTO_CLANG_THIN=y" >> .config
-            sed -i '/^CONFIG_LTO_NONE=/d' .config
-            echo "# CONFIG_LTO_NONE is not set" >> .config
+            case "$CHOICE" in
+              alma)     URL='https://git.almalinux.org/rpms/kernel/-/raw/c9/f/kernel-x86_64-fedora.config' ;;
+              alpine)   URL='https://gitlab.alpinelinux.org/alpine/aports/-/raw/master/main/linux-lts/config-lts.x86_64' ;;
+              arch)     URL='https://gitlab.archlinux.org/archlinux/packaging/packages/linux/-/raw/main/config' ;;
+              centos)   URL='https://gitlab.com/redhat/centos-stream/rpms/kernel/-/raw/c9s/f/kernel-x86_64-fedora.config' ;;
+              debian)   URL='https://salsa.debian.org/kernel-team/linux/-/raw/debian/latest/debian/config/config' ;;
+              fedora)   URL='https://src.fedoraproject.org/rpms/kernel/raw/rawhide/f/kernel-x86_64-fedora.config' ;;
+              gentoo)   URL='https://gitweb.gentoo.org/proj/gentoo-kernel.git/plain/default_config' ;;
+              kali)     URL='https://gitlab.com/kalilinux/packages/linux/-/raw/kali/master/debian/config/config' ;;
+              manjaro)  URL='https://gitlab.manjaro.org/packages/core/linux/-/raw/master/config' ;;
+              nixos)    URL='https://raw.githubusercontent.com/NixOS/nixpkgs/master/pkgs/os-specific/linux/kernel/common-config.nix' ;;
+              opensuse) URL='https://raw.githubusercontent.com/openSUSE/kernel-source/master/config/x86_64/default' ;;
+              rhel)     URL='https://gitlab.com/redhat/centos-stream/rpms/kernel/-/raw/c9s/f/kernel-x86_64-fedora.config' ;;
+              rocky)    URL='https://git.rockylinux.org/rocky/kernel/-/raw/r9/f/kernel-x86_64-fedora.config' ;;
+              ubuntu)   URL='https://git.launchpad.net/~ubuntu-kernel/ubuntu/+source/linux/+git/jammy/plain/debian.master/config/amd64/config.flavour.generic' ;;
+              void)     URL='https://raw.githubusercontent.com/void-linux/void-packages/master/srcpkgs/linux/files/x86_64-dotconfig' ;;
+              *) echo "Unknown: $CHOICE" >&2; exit 1 ;;
+            esac
+            if [ "$KARCH" = "arm64" ]; then
+              case "$CHOICE" in
+                alma|centos|fedora|rhel|rocky)
+                  URL='https://git.almalinux.org/rpms/kernel/-/raw/c9/f/kernel-aarch64-fedora.config' ;;
+                alpine)
+                  URL='https://gitlab.alpinelinux.org/alpine/aports/-/raw/master/main/linux-lts/config-lts.aarch64' ;;
+                opensuse)
+                  URL='https://raw.githubusercontent.com/openSUSE/kernel-source/master/config/arm64/default' ;;
+                ubuntu)
+                  URL='https://git.launchpad.net/~ubuntu-kernel/ubuntu/+source/linux/+git/jammy/plain/debian.master/config/arm64/config.flavour.generic' ;;
+                void)
+                  URL='https://raw.githubusercontent.com/void-linux/void-packages/master/srcpkgs/linux/files/aarch64-dotconfig' ;;
+              esac
+            fi
+            curl -fSL "$URL" -o "$CONFIG_OUT"
           fi
-        fi
 
-        # shellcheck disable=SC2086
-        make $MAKE_ARGS
+          cd kernel-source
+          cp "$CONFIG_OUT" .config
 
-    - name: Stage kernel artifacts
-      id: stage
-      run: |
-        set -euo pipefail
-        cd kernel-source
-        KARCH="${{ steps.arch.outputs.karch }}"
-        KIMAGE="${{ steps.arch.outputs.arch_boot }}"
+          if [ "${{ inputs.respect_config }}" != "true" ]; then
+            sed -i '/^CONFIG_LD_ORPHAN_WARN_LEVEL=/d' .config
+            echo 'CONFIG_LD_ORPHAN_WARN_LEVEL="warn"' >> .config
+            make ARCH="$KARCH" olddefconfig </dev/null
+          fi
 
-        KVER="$(make ARCH="$KARCH" -s kernelrelease)"
-        echo "Kernel release: $KVER"
-        echo "STAGE=$(mktemp -d)" >> "$GITHUB_ENV"
-        echo "KVER=$KVER" >> "$GITHUB_ENV"
+      - name: Apply optimization tweaks
+        run: |
+          set -euo pipefail
+          cd kernel-source
+          KARCH="${{ steps.arch.outputs.karch }}"
+          TWEAKED=false
 
-        mkdir -p "$STAGE/boot"
-        cp "$KIMAGE" "$STAGE/boot/vmlinuz-${KVER}"
-        cp System.map "$STAGE/boot/System.map-${KVER}"
-        cp .config "$STAGE/boot/config-${KVER}"
+          if [ "${{ inputs.disable_log_spam }}" = "true" ]; then
+            TWEAKED=true
+            for c in DEBUG_BUGVERBOSE DEBUG_LIST DEBUG_SG DEBUG_NOTIFIERS DEBUG_CREDENTIALS \
+                      RCU_TRACE SCHED_DEBUG PRINTK_TIME DYNAMIC_DEBUG DEBUG_ATOMIC_SLEEP \
+                      DEBUG_PREEMPT DEBUG_SPINLOCK DEBUG_MUTEXES DEBUG_RT_MUTEXES \
+                      DEBUG_WW_MUTEX_SLOWPATH DEBUG_LOCK_ALLOC DEBUG_LOCKDEP \
+                      DEBUG_KOBJECT DEBUG_KOBJECT_RELEASE; do
+              sed -i "/^CONFIG_${c}=/d" .config
+              echo "# CONFIG_${c} is not set" >> .config
+            done
+          fi
 
-        if [ "${{ inputs.strip_modules }}" = "true" ]; then
-          make ARCH="$KARCH" modules_install INSTALL_MOD_PATH="$STAGE" INSTALL_MOD_STRIP=1
-        else
-          make ARCH="$KARCH" modules_install INSTALL_MOD_PATH="$STAGE"
-        fi
-        rm -f "$STAGE/lib/modules/${KVER}/build" "$STAGE/lib/modules/${KVER}/source"
+          if [ "${{ inputs.performance_tune }}" = "true" ]; then
+            TWEAKED=true
+            for c in NO_HZ_FULL RCU_NOCBS PREEMPT_DYNAMIC CPU_FREQ_DEFAULT_GOV_PERFORMANCE; do
+              sed -i "/^CONFIG_${c}=/d" .config
+              echo "CONFIG_${c}=y" >> .config
+            done
+            for c in MITIGATION_RETPOLINE MITIGATION_SPECTRE_BHI MITIGATION_IBPB_ENTRY \
+                      MITIGATION_IBRS_ENTRY MITIGATION_L1TF MITIGATION_PTI; do
+              sed -i "/^CONFIG_${c}=/d" .config
+              echo "# CONFIG_${c} is not set" >> .config
+            done
+            sed -i '/^CONFIG_CPU_FREQ_DEFAULT_GOV_ONDEMAND=/d' .config
+            echo "# CONFIG_CPU_FREQ_DEFAULT_GOV_ONDEMAND is not set" >> .config
+          fi
 
-    - name: Stage headers
-      id: headers
-      if: inputs.include_headers == true
-      run: |
-        set -euo pipefail
-        cd kernel-source
-        KARCH="${{ steps.arch.outputs.karch }}"
+          if [ "${{ inputs.low_latency }}" = "true" ]; then
+            TWEAKED=true
+            sed -i '/^CONFIG_PREEMPT=/d' .config
+            sed -i '/^CONFIG_PREEMPT_VOLUNTARY=/d' .config
+            sed -i '/^CONFIG_PREEMPT_NONE=/d' .config
+            echo "CONFIG_PREEMPT=y" >> .config
+            sed -i '/^CONFIG_HZ_250=/d' .config
+            sed -i '/^CONFIG_HZ_300=/d' .config
+            sed -i '/^CONFIG_HZ_100=/d' .config
+            echo "CONFIG_HZ_1000=y" >> .config
+            sed -i '/^CONFIG_RCU_BOOST=/d' .config
+            echo "CONFIG_RCU_BOOST=y" >> .config
+          fi
 
-        HDR_STAGE="$(mktemp -d)"
-        echo "HDR_STAGE=$HDR_STAGE" >> "$GITHUB_ENV"
+          if [ "${{ inputs.debug_off }}" = "true" ]; then
+            TWEAKED=true
+            for c in KASAN KMSAN KCSAN KFENCE KMEMLEAK DEBUG_INFO DWARF_TOOLCHAIN_DEFAULT \
+                      FTRACE FUNCTION_TRACER FUNCTION_GRAPH_TRACER STACK_TRACER \
+                      KPROBES UPROBES TRACEPOINTS DEBUG_FS SLUB_DEBUG \
+                      DEBUG_PAGEALLOC DEBUG_KMEMLEAK DEBUG_STACK_USAGE \
+                      SCHEDSTATS LATENCYTOP LOCK_STAT; do
+              sed -i "/^CONFIG_${c}=/d" .config
+              echo "# CONFIG_${c} is not set" >> .config
+            done
+          fi
 
-        HDR_DIR="$HDR_STAGE/usr/src/linux-headers-${KVER}"
-        mkdir -p "$HDR_DIR"
+          if [ "${{ inputs.size_optimize }}" = "true" ]; then
+            TWEAKED=true
+            sed -i '/^CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE=/d' .config
+            echo "CONFIG_CC_OPTIMIZE_FOR_SIZE=y" >> .config
+            for c in MODULE_SIG MODULE_SIG_ALL MODULE_SIG_FORCE; do
+              sed -i "/^CONFIG_${c}=/d" .config
+              echo "# CONFIG_${c} is not set" >> .config
+            done
+          fi
 
-        if [ "${{ inputs.headers_full_tree }}" = "true" ]; then
-          cp -a include "$HDR_DIR/"
-          cp -a scripts "$HDR_DIR/"
-          cp -a arch "$HDR_DIR/"
-        else
-          cp -a include "$HDR_DIR/"
-          mkdir -p "$HDR_DIR/scripts"
-          for d in basic mod package recordmk kernel; do
-            [ -d "scripts/$d" ] && cp -a "scripts/$d" "$HDR_DIR/scripts/"
-          done
-          mkdir -p "$HDR_DIR/arch"
-          cp -a "arch/$KARCH" "$HDR_DIR/arch/"
-        fi
+          if [ "$TWEAKED" = "true" ] && [ "${{ inputs.respect_config }}" != "true" ]; then
+            make ARCH="$KARCH" olddefconfig </dev/null
+          fi
 
-        cp Makefile .config Module.symvers Kbuild "$HDR_DIR/" 2>/dev/null || true
+      - name: Compile kernel
+        run: |
+          set -euo pipefail
+          cd kernel-source
+          KARCH="${{ steps.arch.outputs.karch }}"
 
-    - name: Package deb
-      if: contains(matrix.formats, 'deb')
-      run: |
-        set -euo pipefail
-        DEB_ARCH="${{ steps.arch.outputs.deb_arch }}"
-        mkdir -p dist/deb
+          JOBS="${{ inputs.parallel_jobs }}"
+          if [ "$JOBS" = "auto" ]; then
+            JOBS=$(nproc)
+          fi
 
-        IMG_DIR="$(mktemp -d)/linux-image-${KVER}"
-        mkdir -p "$IMG_DIR/DEBIAN" "$IMG_DIR/boot" "$IMG_DIR/lib/modules"
-        cp "$STAGE/boot/vmlinuz-${KVER}" "$IMG_DIR/boot/vmlinuz-${KVER}" 2>/dev/null || \
-          cp "$STAGE/boot/"vmlinuz* "$IMG_DIR/boot/vmlinuz-${KVER}"
-        cp "$STAGE/boot/System.map-${KVER}" "$IMG_DIR/boot/"
-        cp "$STAGE/boot/config-${KVER}" "$IMG_DIR/boot/"
-        cp -a "$STAGE/lib/modules/${KVER}" "$IMG_DIR/lib/modules/"
+          MAKE_ARGS="ARCH=$KARCH -j$JOBS"
 
-        cat > "$IMG_DIR/DEBIAN/control" <<EOF
-        Package: linux-image-${KVER}
-        Version: 1
-        Architecture: ${DEB_ARCH}
-        Maintainer: CI
-        Description: Linux kernel ${KVER}
-        EOF
-        echo '#!/bin/sh' > "$IMG_DIR/DEBIAN/postinst"
-        echo "depmod ${KVER} || true" >> "$IMG_DIR/DEBIAN/postinst"
-        chmod 755 "$IMG_DIR/DEBIAN/postinst"
-        dpkg-deb --root-owner-group --build "$IMG_DIR" "dist/deb/linux-image-${KVER}_${DEB_ARCH}.deb"
+          if [ "${{ inputs.ccache }}" = "true" ]; then
+            export PATH="/usr/lib/ccache:$PATH"
+            export CC="ccache gcc"
+            export HOSTCC="ccache gcc"
+          fi
 
-        if [ "${{ inputs.include_headers }}" = "true" ]; then
-          HDR_DIR="$(mktemp -d)/linux-headers-${KVER}"
-          mkdir -p "$HDR_DIR/DEBIAN" "$HDR_DIR/usr/src/linux-headers-${KVER}"
-          cp -a "$HDR_STAGE/usr/src/linux-headers-${KVER}/." "$HDR_DIR/usr/src/linux-headers-${KVER}/"
-          cat > "$HDR_DIR/DEBIAN/control" <<EOF
-          Package: linux-headers-${KVER}
+          if [ "${{ inputs.lto_clang }}" = "true" ] || [ "${{ inputs.thin_lto }}" = "true" ]; then
+            MAKE_ARGS="$MAKE_ARGS LLVM=1"
+            if [ "${{ inputs.lto_clang }}" = "true" ]; then
+              sed -i '/^CONFIG_LTO=/d' .config
+              echo "CONFIG_LTO=y" >> .config
+              sed -i '/^CONFIG_LTO_CLANG_FULL=/d' .config
+              echo "CONFIG_LTO_CLANG_FULL=y" >> .config
+              sed -i '/^CONFIG_LTO_NONE=/d' .config
+              echo "# CONFIG_LTO_NONE is not set" >> .config
+            else
+              sed -i '/^CONFIG_LTO=/d' .config
+              echo "CONFIG_LTO=y" >> .config
+              sed -i '/^CONFIG_LTO_CLANG_THIN=/d' .config
+              echo "CONFIG_LTO_CLANG_THIN=y" >> .config
+              sed -i '/^CONFIG_LTO_NONE=/d' .config
+              echo "# CONFIG_LTO_NONE is not set" >> .config
+            fi
+          fi
+
+          make $MAKE_ARGS
+
+      - name: Stage kernel artifacts
+        id: stage
+        run: |
+          set -euo pipefail
+          cd kernel-source
+          KARCH="${{ steps.arch.outputs.karch }}"
+          KIMAGE="${{ steps.arch.outputs.arch_boot }}"
+
+          KVER="$(make ARCH="$KARCH" -s kernelrelease)"
+          echo "Kernel release: $KVER"
+          STAGE_DIR="$(mktemp -d)"
+          echo "STAGE=$STAGE_DIR" >> "$GITHUB_ENV"
+          echo "KVER=$KVER" >> "$GITHUB_ENV"
+
+          mkdir -p "$STAGE_DIR/boot"
+          cp "$KIMAGE" "$STAGE_DIR/boot/vmlinuz-${KVER}"
+          cp System.map "$STAGE_DIR/boot/System.map-${KVER}"
+          cp .config "$STAGE_DIR/boot/config-${KVER}"
+
+          if [ "${{ inputs.strip_modules }}" = "true" ]; then
+            make ARCH="$KARCH" modules_install INSTALL_MOD_PATH="$STAGE_DIR" INSTALL_MOD_STRIP=1
+          else
+            make ARCH="$KARCH" modules_install INSTALL_MOD_PATH="$STAGE_DIR"
+          fi
+          rm -f "$STAGE_DIR/lib/modules/${KVER}/build" "$STAGE_DIR/lib/modules/${KVER}/source"
+
+      - name: Stage headers
+        if: inputs.include_headers == 'true'
+        run: |
+          set -euo pipefail
+          cd kernel-source
+          KARCH="${{ steps.arch.outputs.karch }}"
+
+          HDR_STAGE_DIR="$(mktemp -d)"
+          echo "HDR_STAGE=$HDR_STAGE_DIR" >> "$GITHUB_ENV"
+
+          HDR_DIR="$HDR_STAGE_DIR/usr/src/linux-headers-${KVER}"
+          mkdir -p "$HDR_DIR"
+
+          if [ "${{ inputs.headers_full_tree }}" = "true" ]; then
+            cp -a include "$HDR_DIR/"
+            cp -a scripts "$HDR_DIR/"
+            cp -a arch "$HDR_DIR/"
+          else
+            cp -a include "$HDR_DIR/"
+            mkdir -p "$HDR_DIR/scripts"
+            for d in basic mod package recordmk kernel; do
+              if [ -d "scripts/$d" ]; then
+                cp -a "scripts/$d" "$HDR_DIR/scripts/"
+              fi
+            done
+            mkdir -p "$HDR_DIR/arch"
+            cp -a "arch/$KARCH" "$HDR_DIR/arch/"
+          fi
+
+          cp Makefile .config Module.symvers Kbuild "$HDR_DIR/" 2>/dev/null || true
+
+      - name: Package deb
+        if: contains(matrix.formats, 'deb')
+        run: |
+          set -euo pipefail
+          DEB_ARCH="${{ steps.arch.outputs.deb_arch }}"
+          mkdir -p dist/deb
+
+          IMG_DIR="$(mktemp -d)/linux-image-${KVER}"
+          mkdir -p "$IMG_DIR/DEBIAN" "$IMG_DIR/boot" "$IMG_DIR/lib/modules"
+          cp "$STAGE/boot/vmlinuz-${KVER}" "$IMG_DIR/boot/vmlinuz-${KVER}" 2>/dev/null || \
+            cp "$STAGE/boot/"vmlinuz* "$IMG_DIR/boot/vmlinuz-${KVER}"
+          cp "$STAGE/boot/System.map-${KVER}" "$IMG_DIR/boot/"
+          cp "$STAGE/boot/config-${KVER}" "$IMG_DIR/boot/"
+          cp -a "$STAGE/lib/modules/${KVER}" "$IMG_DIR/lib/modules/"
+
+          cat > "$IMG_DIR/DEBIAN/control" <<CONTROL_EOF
+          Package: linux-image-${KVER}
           Version: 1
           Architecture: ${DEB_ARCH}
           Maintainer: CI
-          Description: Headers for ${KVER}
-          EOF
-          dpkg-deb --root-owner-group --build "$HDR_DIR" "dist/deb/linux-headers-${KVER}_${DEB_ARCH}.deb"
-        fi
+          Description: Linux kernel ${KVER}
+          CONTROL_EOF
 
-    - name: Package rpm
-      if: contains(matrix.formats, 'rpm')
-      run: |
-        set -euo pipefail
-        RPM_ARCH="${{ steps.arch.outputs.rpm_arch }}"
-        RPM_VER="$(echo "$KVER" | rev | cut -d'-' -f2- | rev)"
-        RPM_REL="$(echo "$KVER" | rev | cut -d'-' -f1 | rev)_1"
-        [ -z "$RPM_VER" ] && RPM_VER="$KVER"
-        [ -z "$RPM_REL" ] && RPM_REL="1"
+          echo '#!/bin/sh' > "$IMG_DIR/DEBIAN/postinst"
+          echo "depmod ${KVER} || true" >> "$IMG_DIR/DEBIAN/postinst"
+          chmod 755 "$IMG_DIR/DEBIAN/postinst"
 
-        RPM_DIR="$(mktemp -d)"
-        mkdir -p "$RPM_DIR"/{BUILD,RPMS,SOURCES,SPECS,BUILDROOT}
+          dpkg-deb --root-owner-group --build "$IMG_DIR" "dist/deb/linux-image-${KVER}_${DEB_ARCH}.deb"
 
-        cat > "$RPM_DIR/SPECS/kernel-image.spec" <<EOF
-        %global debug_package %{nil}
-        %global __strip /bin/true
-        %global __find_provides %{nil}
-        %global __find_requires %{nil}
-        %define _unpackaged_files_terminate_build 0
+          if [ "${{ inputs.include_headers }}" = "true" ]; then
+            HDR_DIR="$(mktemp -d)/linux-headers-${KVER}"
+            mkdir -p "$HDR_DIR/DEBIAN" "$HDR_DIR/usr/src/linux-headers-${KVER}"
+            cp -a "$HDR_STAGE/usr/src/linux-headers-${KVER}/." "$HDR_DIR/usr/src/linux-headers-${KVER}/"
+            cat > "$HDR_DIR/DEBIAN/control" <<CONTROL_EOF
+            Package: linux-headers-${KVER}
+            Version: 1
+            Architecture: ${DEB_ARCH}
+            Maintainer: CI
+            Description: Headers for ${KVER}
+            CONTROL_EOF
+            dpkg-deb --root-owner-group --build "$HDR_DIR" "dist/deb/linux-headers-${KVER}_${DEB_ARCH}.deb"
+          fi
 
-        Name: kernel-image-${KVER}
-        Version: ${RPM_VER}
-        Release: ${RPM_REL}
-        Summary: Linux kernel ${KVER}
-        License: GPL-2.0-only
-        AutoReqProv: no
-        BuildArch: ${RPM_ARCH}
+      - name: Package rpm
+        if: contains(matrix.formats, 'rpm')
+        run: |
+          set -euo pipefail
+          RPM_ARCH="${{ steps.arch.outputs.rpm_arch }}"
+          RPM_VER="$(echo "$KVER" | rev | cut -d'-' -f2- | rev)"
+          RPM_REL="$(echo "$KVER" | rev | cut -d'-' -f1 | rev)_1"
+          if [ -z "$RPM_VER" ]; then RPM_VER="$KVER"; fi
+          if [ -z "$RPM_REL" ]; then RPM_REL="1"; fi
 
-        %description
-        Kernel image + modules
+          RPM_TOPDIR="$(mktemp -d)"
+          mkdir -p "$RPM_TOPDIR"/{BUILD,RPMS,SOURCES,SPECS,BUILDROOT}
 
-        %install
-        rm -rf %{buildroot}
-        mkdir -p %{buildroot}/boot %{buildroot}/lib/modules
-        cp ${STAGE}/boot/vmlinuz-${KVER} %{buildroot}/boot/ 2>/dev/null || true
-        cp ${STAGE}/boot/System.map-${KVER} %{buildroot}/boot/ 2>/dev/null || true
-        cp ${STAGE}/boot/config-${KVER} %{buildroot}/boot/ 2>/dev/null || true
-        cp -a ${STAGE}/lib/modules/${KVER} %{buildroot}/lib/modules/ 2>/dev/null || true
-
-        %files
-        /boot/vmlinuz-${KVER}
-        /boot/System.map-${KVER}
-        /boot/config-${KVER}
-        /lib/modules/${KVER}
-        EOF
-
-        if [ "${{ inputs.include_headers }}" = "true" ]; then
-          cat > "$RPM_DIR/SPECS/kernel-headers.spec" <<EOF
+          cat > "$RPM_TOPDIR/SPECS/kernel-image.spec" <<SPEC_EOF
           %global debug_package %{nil}
           %global __strip /bin/true
           %global __find_provides %{nil}
           %global __find_requires %{nil}
           %define _unpackaged_files_terminate_build 0
 
-          Name: kernel-headers-${KVER}
+          Name: kernel-image-${KVER}
           Version: ${RPM_VER}
           Release: ${RPM_REL}
-          Summary: Headers for ${KVER}
+          Summary: Linux kernel ${KVER}
           License: GPL-2.0-only
           AutoReqProv: no
           BuildArch: ${RPM_ARCH}
 
+          %description
+          Kernel image and modules
+
           %install
           rm -rf %{buildroot}
-          mkdir -p %{buildroot}/usr/src/linux-headers-${KVER}
-          cp -a ${HDR_STAGE}/usr/src/linux-headers-${KVER}/. %{buildroot}/usr/src/linux-headers-${KVER}/
+          mkdir -p %{buildroot}/boot %{buildroot}/lib/modules
+          cp ${STAGE}/boot/vmlinuz-${KVER} %{buildroot}/boot/ 2>/dev/null || :
+          cp ${STAGE}/boot/System.map-${KVER} %{buildroot}/boot/ 2>/dev/null || :
+          cp ${STAGE}/boot/config-${KVER} %{buildroot}/boot/ 2>/dev/null || :
+          cp -a ${STAGE}/lib/modules/${KVER} %{buildroot}/lib/modules/ 2>/dev/null || :
 
           %files
-          /usr/src/linux-headers-${KVER}
-          EOF
-          rpmbuild --define "_topdir $RPM_DIR" -bb "$RPM_DIR/SPECS/kernel-headers.spec"
-        fi
+          /boot/vmlinuz-${KVER}
+          /boot/System.map-${KVER}
+          /boot/config-${KVER}
+          /lib/modules/${KVER}
+          SPEC_EOF
 
-        rpmbuild --define "_topdir $RPM_DIR" -bb "$RPM_DIR/SPECS/kernel-image.spec"
-        mkdir -p dist/rpm
-        find "$RPM_DIR/RPMS" -name '*.rpm' -exec cp {} dist/rpm/ \;
+          if [ "${{ inputs.include_headers }}" = "true" ]; then
+            cat > "$RPM_TOPDIR/SPECS/kernel-headers.spec" <<SPEC_EOF
+            %global debug_package %{nil}
+            %global __strip /bin/true
+            %global __find_provides %{nil}
+            %global __find_requires %{nil}
+            %define _unpackaged_files_terminate_build 0
 
-    - name: Package tar.xz
-      if: contains(matrix.formats, 'tarxz')
-      run: |
-        set -euo pipefail
-        ARCH="${{ matrix.arch }}"
-        PKG_ROOT="$(mktemp -d)/linux-${KVER}-${ARCH}"
-        mkdir -p "$PKG_ROOT/boot" "$PKG_ROOT/lib/modules"
+            Name: kernel-headers-${KVER}
+            Version: ${RPM_VER}
+            Release: ${RPM_REL}
+            Summary: Headers for ${KVER}
+            License: GPL-2.0-only
+            AutoReqProv: no
+            BuildArch: ${RPM_ARCH}
 
-        cp "$STAGE/boot/vmlinuz-${KVER}" "$PKG_ROOT/boot/vmlinuz-${KVER}" 2>/dev/null || \
-          cp "$STAGE/boot/"vmlinuz* "$PKG_ROOT/boot/vmlinuz-${KVER}"
-        cp "$STAGE/boot/System.map-${KVER}" "$PKG_ROOT/boot/"
-        cp "$STAGE/boot/config-${KVER}" "$PKG_ROOT/boot/"
-        cp -a "$STAGE/lib/modules/${KVER}" "$PKG_ROOT/lib/modules/"
+            %install
+            rm -rf %{buildroot}
+            mkdir -p %{buildroot}/usr/src/linux-headers-${KVER}
+            cp -a ${HDR_STAGE}/usr/src/linux-headers-${KVER}/. %{buildroot}/usr/src/linux-headers-${KVER}/
 
-        if [ "${{ inputs.include_headers }}" = "true" ] && [ "${{ inputs.tarxz_include_headers }}" = "true" ]; then
-          mkdir -p "$PKG_ROOT/usr/src"
-          cp -a "$HDR_STAGE/usr/src/linux-headers-${KVER}" "$PKG_ROOT/usr/src/"
-        fi
+            %files
+            /usr/src/linux-headers-${KVER}
+            SPEC_EOF
+            rpmbuild --define "_topdir $RPM_TOPDIR" -bb "$RPM_TOPDIR/SPECS/kernel-headers.spec"
+          fi
 
-        cat > "$PKG_ROOT/install-${KVER}.sh" <<EOF
-        #!/bin/sh
-        set -e
-        [ "\$(id -u)" = "0" ] || { echo "Run as root" >&2; exit 1; }
-        cp -a "$PKG_ROOT/boot/"* /boot/ 2>/dev/null || true
-        cp -a "$PKG_ROOT/lib/modules/${KVER}" /lib/modules/ 2>/dev/null || true
-        if [ -d "$PKG_ROOT/usr/src/linux-headers-${KVER}" ]; then
-          cp -a "$PKG_ROOT/usr/src/linux-headers-${KVER}" /usr/src/
-        fi
-        depmod ${KVER} 2>/dev/null || true
-        echo "Done."
-        EOF
-        chmod 755 "$PKG_ROOT/install-${KVER}.sh"
+          rpmbuild --define "_topdir $RPM_TOPDIR" -bb "$RPM_TOPDIR/SPECS/kernel-image.spec"
+          mkdir -p dist/rpm
+          find "$RPM_TOPDIR/RPMS" -name '*.rpm' -exec cp {} dist/rpm/ \;
 
-        mkdir -p dist/tarxz
-        ( cd "$(dirname "$PKG_ROOT")" && tar --owner=0 --group=0 --numeric-owner -cJf \
-          "$OLDPWD/dist/tarxz/linux-${KVER}-${ARCH}.tar.xz" "$(basename "$PKG_ROOT")" )
+      - name: Package tar.xz
+        if: contains(matrix.formats, 'tarxz')
+        run: |
+          set -euo pipefail
+          ARCH="${{ matrix.arch }}"
+          PKG_ROOT="$(mktemp -d)/linux-${KVER}-${ARCH}"
+          mkdir -p "$PKG_ROOT/boot" "$PKG_ROOT/lib/modules"
 
-    - name: Package pkg.tar.zst
-      if: contains(matrix.formats, 'pkg')
-      run: |
-        set -euo pipefail
-        ARCH="${{ matrix.arch }}"
+          cp "$STAGE/boot/vmlinuz-${KVER}" "$PKG_ROOT/boot/vmlinuz-${KVER}" 2>/dev/null || \
+            cp "$STAGE/boot/"vmlinuz* "$PKG_ROOT/boot/vmlinuz-${KVER}"
+          cp "$STAGE/boot/System.map-${KVER}" "$PKG_ROOT/boot/"
+          cp "$STAGE/boot/config-${KVER}" "$PKG_ROOT/boot/"
+          cp -a "$STAGE/lib/modules/${KVER}" "$PKG_ROOT/lib/modules/"
 
-        IMG_ROOT="$(mktemp -d)"
-        mkdir -p "$IMG_ROOT/boot" "$IMG_ROOT/lib/modules"
-        cp "$STAGE/boot/vmlinuz-${KVER}" "$IMG_ROOT/boot/vmlinuz-${KVER}" 2>/dev/null || \
-          cp "$STAGE/boot/"vmlinuz* "$IMG_ROOT/boot/vmlinuz-${KVER}"
-        cp "$STAGE/boot/System.map-${KVER}" "$IMG_ROOT/boot/"
-        cp "$STAGE/boot/config-${KVER}" "$IMG_ROOT/boot/"
-        cp -a "$STAGE/lib/modules/${KVER}" "$IMG_ROOT/lib/modules/"
+          if [ "${{ inputs.include_headers }}" = "true" ] && [ "${{ inputs.tarxz_include_headers }}" = "true" ]; then
+            mkdir -p "$PKG_ROOT/usr/src"
+            cp -a "$HDR_STAGE/usr/src/linux-headers-${KVER}" "$PKG_ROOT/usr/src/"
+          fi
 
-        cat > "$IMG_ROOT/.PKGINFO" <<EOF
-        pkgname = linux-image-${KVER}
-        pkgver = ${KVER}-1
-        arch = ${ARCH}
-        license = GPL-2.0-only
-        EOF
+          cat > "$PKG_ROOT/install-${KVER}.sh" <<INSTALL_EOF
+          #!/bin/sh
+          set -e
+          [ "\$(id -u)" = "0" ] || { echo "Run as root" >&2; exit 1; }
+          mkdir -p /boot
+          cp -a "$PKG_ROOT/boot/"* /boot/ 2>/dev/null || true
+          cp -a "$PKG_ROOT/lib/modules/${KVER}" /lib/modules/ 2>/dev/null || true
+          if [ -d "$PKG_ROOT/usr/src/linux-headers-${KVER}" ]; then
+            cp -a "$PKG_ROOT/usr/src/linux-headers-${KVER}" /usr/src/
+          fi
+          depmod ${KVER} 2>/dev/null || true
+          echo "Done."
+          INSTALL_EOF
+          chmod 755 "$PKG_ROOT/install-${KVER}.sh"
 
-        mkdir -p dist/pkg
-        ( cd "$IMG_ROOT" && tar --owner=0 --group=0 --numeric-owner -cf - . | \
-          zstd -T0 -19 -o "$OLDPWD/dist/pkg/linux-image-${KVER}-${ARCH}.pkg.tar.zst" -f )
+          mkdir -p dist/tarxz
+          ( cd "$(dirname "$PKG_ROOT")" && tar --owner=0 --group=0 --numeric-owner -cJf \
+            "$OLDPWD/dist/tarxz/linux-${KVER}-${ARCH}.tar.xz" "$(basename "$PKG_ROOT")" )
 
-        if [ "${{ inputs.include_headers }}" = "true" ]; then
-          HDR_ROOT="$(mktemp -d)"
-          mkdir -p "$HDR_ROOT/usr/src/linux-headers-${KVER}"
-          cp -a "$HDR_STAGE/usr/src/linux-headers-${KVER}/." "$HDR_ROOT/usr/src/linux-headers-${KVER}/"
-          cat > "$HDR_ROOT/.PKGINFO" <<EOF
-          pkgname = linux-headers-${KVER}
+      - name: Package pkg.tar.zst
+        if: contains(matrix.formats, 'pkg')
+        run: |
+          set -euo pipefail
+          ARCH="${{ matrix.arch }}"
+
+          IMG_ROOT="$(mktemp -d)"
+          mkdir -p "$IMG_ROOT/boot" "$IMG_ROOT/lib/modules"
+          cp "$STAGE/boot/vmlinuz-${KVER}" "$IMG_ROOT/boot/vmlinuz-${KVER}" 2>/dev/null || \
+            cp "$STAGE/boot/"vmlinuz* "$IMG_ROOT/boot/vmlinuz-${KVER}"
+          cp "$STAGE/boot/System.map-${KVER}" "$IMG_ROOT/boot/"
+          cp "$STAGE/boot/config-${KVER}" "$IMG_ROOT/boot/"
+          cp -a "$STAGE/lib/modules/${KVER}" "$IMG_ROOT/lib/modules/"
+
+          cat > "$IMG_ROOT/.PKGINFO" <<PKGINFO_EOF
+          pkgname = linux-image-${KVER}
           pkgver = ${KVER}-1
           arch = ${ARCH}
           license = GPL-2.0-only
-          EOF
-          ( cd "$HDR_ROOT" && tar --owner=0 --group=0 --numeric-owner -cf - . | \
-            zstd -T0 -19 -o "$OLDPWD/dist/pkg/linux-headers-${KVER}-${ARCH}.pkg.tar.zst" -f )
-        fi
+          PKGINFO_EOF
 
-    - name: Upload artifacts
-      if: always() && !cancelled()
-      uses: actions/upload-artifact@v4
-      with:
-        name: kernel-${{ matrix.arch }}-${{ strategy.job-index }}
-        path: dist/**/*
-        if-no-files-found: warn
-        retention-days: 7
+          mkdir -p dist/pkg
+          ( cd "$IMG_ROOT" && tar --owner=0 --group=0 --numeric-owner -cf - . | \
+            zstd -T0 -19 -o "$OLDPWD/dist/pkg/linux-image-${KVER}-${ARCH}.pkg.tar.zst" -f )
 
-    - name: Collect dist
-      if: always() && !cancelled()
-      run: find dist -type f -exec ls -lh {} \; 2>/dev/null || true
+          if [ "${{ inputs.include_headers }}" = "true" ]; then
+            HDR_ROOT="$(mktemp -d)"
+            mkdir -p "$HDR_ROOT/usr/src/linux-headers-${KVER}"
+            cp -a "$HDR_STAGE/usr/src/linux-headers-${KVER}/." "$HDR_ROOT/usr/src/linux-headers-${KVER}/"
+            cat > "$HDR_ROOT/.PKGINFO" <<PKGINFO_EOF
+            pkgname = linux-headers-${KVER}
+            pkgver = ${KVER}-1
+            arch = ${ARCH}
+            license = GPL-2.0-only
+            PKGINFO_EOF
+            ( cd "$HDR_ROOT" && tar --owner=0 --group=0 --numeric-owner -cf - . | \
+              zstd -T0 -19 -o "$OLDPWD/dist/pkg/linux-headers-${KVER}-${ARCH}.pkg.tar.zst" -f )
+          fi
+
+      - name: Upload artifacts
+        if: always() && !cancelled()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-${{ matrix.arch }}-${{ strategy.job-index }}
+          path: dist/**/*
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Collect dist
+        if: always() && !cancelled()
+        run: find dist -type f -exec ls -lh {} \; 2>/dev/null || true
 
   publish:
     needs: build
