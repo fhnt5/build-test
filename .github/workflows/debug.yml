@@ -1,3 +1,538 @@
+name: Debug Build Kernel
+
+on:
+  workflow_dispatch:
+    inputs:
+      x86_64_deb:   { description: 'x86_64  ›  deb', type: boolean, default: true }
+      x86_64_rpm:   { description: 'x86_64  ›  rpm', type: boolean, default: false }
+      x86_64_tarxz: { description: 'x86_64  ›  tar.xz（自带 install/uninstall/README，无容器）', type: boolean, default: false }
+      arm64_deb:    { description: 'arm64   ›  deb', type: boolean, default: false }
+      arm64_rpm:    { description: 'arm64   ›  rpm', type: boolean, default: false }
+      arm64_tarxz:  { description: 'arm64   ›  tar.xz（自带 install/uninstall/README，无容器）', type: boolean, default: false }
+      config_choice:
+        description: '内核配置来源：内核自带目标 / 仓库 configs/* / 发行版'
+        type: choice
+        required: true
+        default: 'default'
+        options:
+          - 'default'
+          - 'allyesconfig'
+          - 'allmodconfig'
+          - 'allnoconfig'
+          - 'tinyconfig'
+          - 'configs/G40_45.config'
+          - 'alma'
+          - 'alpine'
+          - 'arch'
+          - 'centos'
+          - 'debian'
+          - 'fedora'
+          - 'gentoo'
+          - 'kali'
+          - 'manjaro'
+          - 'nixos'
+          - 'opensuse'
+          - 'rhel'
+          - 'rocky'
+          - 'ubuntu'
+          - 'void'
+      config_custom:
+        description: '（可选）自定义配置：仓库内路径 / http(s):// URL。填了则覆盖上面的选择'
+        type: string
+        required: false
+        default: ''
+      kernel_repo:
+        description: '内核源码仓库 URL'
+        required: true
+        default: 'https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux-stable.git'
+      kernel_ref:
+        description: '分支或 tag（如 v7.2.6 / master）。留空则自动使用最新 stable 版本'
+        required: false
+        default: ''
+      release_tag:
+        description: '（可选）完成后发布到该 tag 的 Release，留空则不发布'
+        required: false
+        default: ''
+      debug_verbose:
+        description: '开启 shell 逐行跟踪（set -x），日志会非常长'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.gen.outputs.matrix }}
+    steps:
+      - name: Generate build matrix
+        id: gen
+        run: |
+          MATRIX='{"include":[]}'
+          add() {
+            MATRIX=$(echo "$MATRIX" | jq -c --arg a "$1" --arg f "$2" \
+              '.include += [{arch:$a, format:$f}]')
+          }
+          [ "${{ inputs.x86_64_deb }}"   = "true" ] && add x86_64 deb
+          [ "${{ inputs.x86_64_rpm }}"   = "true" ] && add x86_64 rpm
+          [ "${{ inputs.x86_64_tarxz }}" = "true" ] && add x86_64 tarxz
+          [ "${{ inputs.arm64_deb }}"    = "true" ] && add arm64  deb
+          [ "${{ inputs.arm64_rpm }}"    = "true" ] && add arm64  rpm
+          [ "${{ inputs.arm64_tarxz }}"  = "true" ] && add arm64  tarxz
+          COUNT=$(echo "$MATRIX" | jq '.include | length')
+          echo "MATRIX = $MATRIX"
+          [ "$COUNT" -eq 0 ] && { echo "No build target selected." >&2; exit 1; }
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+
+  resolve-ref:
+    runs-on: ubuntu-latest
+    outputs:
+      kernel_ref: ${{ steps.resolve.outputs.kernel_ref }}
+    steps:
+      - name: Resolve kernel ref
+        id: resolve
+        run: |
+          INPUT_REF="${{ inputs.kernel_ref }}"
+          if [ -n "$INPUT_REF" ]; then
+            echo "kernel_ref=$INPUT_REF" >> "$GITHUB_OUTPUT"
+          else
+            LATEST=$(git ls-remote --tags --refs --sort=-v:refname \
+              https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux-stable.git \
+              | awk -F/ '{print $NF}' \
+              | grep -E '^v[0-9]+\.[0-9]+(\.[0-9]+)?$' | head -1)
+            [ -z "$LATEST" ] && { echo "ERROR: failed to detect" >&2; exit 1; }
+            echo "kernel_ref=$LATEST" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    needs: [prepare, resolve-ref]
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Create shared log analyzer
+      run: |
+        cat > /tmp/analyze-log.sh <<'ANALYZE_EOF'
+        #!/bin/bash
+        LOG_FILE="$1"; FMT="$2"; ARCH="$3"
+        [ -f "$LOG_FILE" ] || { echo "WARN: analyze-log.sh: no log at $LOG_FILE"; exit 0; }
+
+        ERR_PATTERN='(^|[[:space:]])error:|^[^:]*make(\[[0-9]+\])?: \*\*\*|(^|[[:space:]])Error [0-9]+|undefined reference to|multiple definition of|(^|[[:space:]])FAILED:|(^|[[:space:]])ERROR:|(^|[[:space:]])FATAL|ld: cannot find|cannot find -l|(^|[[:space:]])No such file or directory|invalid option|unknown option|unrecognized option|invalid argument|pahole:|libbpf:|failed to load BTF|failed to find .\.BTF|No data available'
+
+        ERR_FILTER='WERROR|CONFIG_.*ERROR|ERROR_|-error|perl-error|/tmpfiles\.d/|error_injection|verbose_error|_ERROR_'
+
+        WARN_PATTERN='(^|[[:space:]])(warning|Warning|WARNING):|(^|[[:space:]])WARNING:|deprecated|may be used uninitialized'
+        WARN_FILTER='is up to date -- skipping|Skipping dependency|up to date -- skipping|Userspace interface \(deprecated\)|htmldocs'
+
+        RAW_ERR=$(grep -nE "$ERR_PATTERN" "$LOG_FILE" 2>/dev/null || true)
+        RAW_WARN=$(grep -nE "$WARN_PATTERN" "$LOG_FILE" 2>/dev/null || true)
+
+        ERR_LINES=$(printf '%s\n' "$RAW_ERR" | grep -vE "$ERR_FILTER" | head -500 || true)
+        WARN_LINES=$(printf '%s\n' "$RAW_WARN" | grep -vE "$WARN_FILTER" | head -500 || true)
+
+        ERR_CNT=$(printf '%s\n' "$ERR_LINES" | grep -c . || true)
+        WARN_CNT=$(printf '%s\n' "$WARN_LINES" | grep -c . || true)
+        RAW_ERR_CNT=$(printf '%s\n' "$RAW_ERR" | grep -c . || true)
+        RAW_WARN_CNT=$(printf '%s\n' "$RAW_WARN" | grep -c . || true)
+
+        echo ""
+        echo "╔════════════════════════════════════════════════════════════════╗"
+        echo "║  LOG ANALYSIS — ${FMT} / ${ARCH}"
+        echo "║  log file: ${LOG_FILE}"
+        echo "║  errors:   ${ERR_CNT}   (raw=${RAW_ERR_CNT}, filtered out=$((RAW_ERR_CNT - ERR_CNT)))"
+        echo "║  warnings: ${WARN_CNT}   (raw=${RAW_WARN_CNT}, filtered out=$((RAW_WARN_CNT - WARN_CNT)))"
+        echo "╚════════════════════════════════════════════════════════════════╝"
+        echo ""
+        echo "──────── ERRORS (with line numbers) ────────"
+        if [ "$ERR_CNT" -gt 0 ]; then printf '%s\n' "$ERR_LINES"; else echo "(none)"; fi
+        echo ""
+        echo "──────── WARNINGS (with line numbers) ────────"
+        if [ "$WARN_CNT" -gt 0 ]; then printf '%s\n' "$WARN_LINES"; else echo "(none)"; fi
+        echo ""
+
+        {
+          echo "## Build Log Analysis — ${FMT} / \`${ARCH}\`"
+          echo ""
+          echo "Log: \`${LOG_FILE}\`"
+          echo ""
+          echo "| Category | Count | Raw matches | Filtered out |"
+          echo "|---|---|---|---|"
+          echo "| Errors   | ${ERR_CNT} | ${RAW_ERR_CNT} | $((RAW_ERR_CNT - ERR_CNT)) |"
+          echo "| Warnings | ${WARN_CNT} | ${RAW_WARN_CNT} | $((RAW_WARN_CNT - WARN_CNT)) |"
+          echo ""
+          echo "### Errors (with line numbers)"
+          echo '```'
+          if [ "$ERR_CNT" -gt 0 ]; then printf '%s\n' "$ERR_LINES" | head -100; else echo "(none)"; fi
+          echo '```'
+          echo ""
+          echo "### Warnings (with line numbers)"
+          echo '```'
+          if [ "$WARN_CNT" -gt 0 ]; then printf '%s\n' "$WARN_LINES" | head -100; else echo "(none)"; fi
+          echo '```'
+        } >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
+
+        if [ "$ERR_CNT" -gt 0 ]; then
+          printf '%s\n' "$ERR_LINES" | head -10 | while IFS= read -r l; do
+            [ -n "$l" ] && echo "::error::${l}"
+          done
+        fi
+        if [ "$WARN_CNT" -gt 0 ]; then
+          printf '%s\n' "$WARN_LINES" | head -5 | while IFS= read -r l; do
+            [ -n "$l" ] && echo "::warning::${l}"
+          done
+        fi
+        ANALYZE_EOF
+        chmod +x /tmp/analyze-log.sh
+        echo "analyze-log.sh ready at /tmp/analyze-log.sh"
+
+    - name: Show build target
+      run: |
+        echo "Arch:   ${{ matrix.arch }}"
+        echo "Format: ${{ matrix.format }}"
+        echo "Ref:    ${{ needs.resolve-ref.outputs.kernel_ref }}"
+        echo "Runner: ${{ runner.os }} / ${{ runner.arch }}"
+        echo "Debug:  ${{ inputs.debug_verbose }}"
+
+    - name: Set arch variables
+      id: arch
+      run: |
+        case "${{ matrix.arch }}" in
+          x86_64|amd64)
+            echo "karch=x86_64"   >> "$GITHUB_OUTPUT"
+            echo "deb_arch=amd64" >> "$GITHUB_OUTPUT"
+            echo "carch=x86_64"   >> "$GITHUB_OUTPUT"
+            ;;
+          arm64|aarch64)
+            echo "karch=arm64"    >> "$GITHUB_OUTPUT"
+            echo "deb_arch=arm64" >> "$GITHUB_OUTPUT"
+            echo "carch=aarch64"  >> "$GITHUB_OUTPUT"
+            ;;
+          *)
+            echo "Unsupported arch" >&2
+            exit 1
+            ;;
+        esac
+
+    - name: Free up disk space
+      run: |
+        sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost
+        df -h /
+
+    - name: Install build dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          build-essential libncurses-dev bison flex \
+          libssl-dev libelf-dev libdw-dev elfutils \
+          bc dwarves zstd cpio rsync kmod xz-utils \
+          git jq curl
+        case "${{ matrix.format }}" in
+          deb) sudo apt-get install -y debhelper fakeroot ;;
+          rpm) sudo apt-get install -y rpm rpm2cpio cpio ;;
+        esac
+
+    - name: Clone kernel source
+      run: |
+        git clone --depth 1 --branch "${{ needs.resolve-ref.outputs.kernel_ref }}" \
+          "${{ inputs.kernel_repo }}" kernel-source
+
+    - name: Resolve and apply config
+      run: |
+        CHOICE="${{ inputs.config_choice }}"
+        CUSTOM="${{ inputs.config_custom }}"
+        KARCH="${{ steps.arch.outputs.karch }}"
+        CONFIG_OUT="/tmp/kernel.config"
+
+        [ -n "$CUSTOM" ] && CHOICE="$CUSTOM"
+
+        if [[ "$CHOICE" == http://* ]] || [[ "$CHOICE" == https://* ]]; then
+          echo "==> Source: URL: $CHOICE"
+          curl -fSL "$CHOICE" -o "$CONFIG_OUT"
+          echo "CONFIG_SOURCE=$CHOICE" >> "$GITHUB_ENV"
+
+        elif [ -f "$CHOICE" ]; then
+          echo "==> Source: repo file: $CHOICE"
+          cp "$CHOICE" "$CONFIG_OUT"
+          echo "CONFIG_SOURCE=$CHOICE" >> "$GITHUB_ENV"
+
+        elif [ -f "configs/$CHOICE" ]; then
+          echo "==> Source: repo file: configs/$CHOICE"
+          cp "configs/$CHOICE" "$CONFIG_OUT"
+          echo "CONFIG_SOURCE=configs/$CHOICE" >> "$GITHUB_ENV"
+
+        elif [[ "$CHOICE" =~ ^(default|allyesconfig|allmodconfig|allnoconfig|tinyconfig)$ ]]; then
+          echo "==> Source: kernel built-in target: make $CHOICE"
+          cd kernel-source
+          make ARCH="$KARCH" "$CHOICE"
+          cp .config "$CONFIG_OUT"
+          cd ..
+          echo "CONFIG_SOURCE=kernel built-in: $CHOICE" >> "$GITHUB_ENV"
+
+        else
+          case "$CHOICE" in
+            alma)     URL='https://git.almalinux.org/rpms/kernel/-/raw/c9/f/kernel-x86_64-fedora.config' ;;
+            alpine)   URL='https://gitlab.alpinelinux.org/alpine/aports/-/raw/master/main/linux-lts/config-lts.x86_64' ;;
+            arch)     URL='https://gitlab.archlinux.org/archlinux/packaging/packages/linux/-/raw/main/config' ;;
+            centos)   URL='https://gitlab.com/redhat/centos-stream/rpms/kernel/-/raw/c9s/f/kernel-x86_64-fedora.config' ;;
+            debian)   URL='https://salsa.debian.org/kernel-team/linux/-/raw/debian/latest/debian/config/config' ;;
+            fedora)   URL='https://src.fedoraproject.org/rpms/kernel/raw/rawhide/f/kernel-x86_64-fedora.config' ;;
+            gentoo)   URL='https://gitweb.gentoo.org/proj/gentoo-kernel.git/plain/default_config' ;;
+            kali)     URL='https://gitlab.com/kalilinux/packages/linux/-/raw/kali/master/debian/config/config' ;;
+            manjaro)  URL='https://gitlab.manjaro.org/packages/core/linux/-/raw/master/config' ;;
+            nixos)    URL='https://raw.githubusercontent.com/NixOS/nixpkgs/master/pkgs/os-specific/linux/kernel/common-config.nix' ;;
+            opensuse) URL='https://raw.githubusercontent.com/openSUSE/kernel-source/master/config/x86_64/default' ;;
+            rhel)     URL='https://gitlab.com/redhat/centos-stream/rpms/kernel/-/raw/c9s/f/kernel-x86_64-fedora.config' ;;
+            rocky)    URL='https://git.rockylinux.org/rocky/kernel/-/raw/r9/f/kernel-x86_64-fedora.config' ;;
+            ubuntu)   URL='https://git.launchpad.net/~ubuntu-kernel/ubuntu/+source/linux/+git/jammy/plain/debian.master/config/amd64/config.flavour.generic' ;;
+            void)     URL='https://raw.githubusercontent.com/void-linux/void-packages/master/srcpkgs/linux/files/x86_64-dotconfig' ;;
+            *) echo "Unknown config_choice: $CHOICE" >&2; exit 1 ;;
+          esac
+          echo "==> Source: distro '$CHOICE' -> $URL"
+          curl -fSL "$URL" -o "$CONFIG_OUT" || { echo "ERROR: download $URL failed" >&2; exit 1; }
+          echo "CONFIG_SOURCE=$CHOICE ($URL)" >> "$GITHUB_ENV"
+        fi
+
+        [ -s "$CONFIG_OUT" ] || { echo "ERROR: empty config" >&2; exit 1; }
+        echo "config lines: $(wc -l < "$CONFIG_OUT")"
+
+        cd kernel-source
+        cp "$CONFIG_OUT" .config
+        make ARCH="$KARCH" olddefconfig
+
+    - name: Build kernel packages (deb / rpm)
+      if: matrix.format == 'deb' || matrix.format == 'rpm'
+      env:
+        DEBUG_VERBOSE: ${{ inputs.debug_verbose }}
+      run: |
+        set -uo pipefail
+        [ "${DEBUG_VERBOSE}" = "true" ] && set -x
+
+        LOG="/tmp/build-${{ matrix.format }}-${{ matrix.arch }}.log"
+        mkdir -p dist-debug
+        cd kernel-source
+
+        case "${{ matrix.format }}" in
+          deb)
+            make ARCH=${{ steps.arch.outputs.karch }} \
+                 KDEB_ARCH=${{ steps.arch.outputs.deb_arch }} \
+                 KDEB_OPTS="-a${{ steps.arch.outputs.deb_arch }}" \
+                 DEB_EXCLUDE_PKG="linux-libc-dev linux-image-%-dbg" \
+                 -j$(nproc) bindeb-pkg 2>&1 | tee "$LOG"
+            RC=${PIPESTATUS[0]}
+            ;;
+          rpm)
+            make ARCH=${{ steps.arch.outputs.karch }} \
+                 KCFLAGS="-g0" \
+                 RPM_BUILD_NCPUS=$(nproc) \
+                 RPMOPTS="--define '_topdir $PWD/rpmbuild'" \
+                 -j$(nproc) binrpm-pkg 2>&1 | tee "$LOG"
+            RC=${PIPESTATUS[0]}
+            ;;
+        esac
+
+        echo "make exit code: $RC"
+        cp "$LOG" dist-debug/ 2>/dev/null || true
+        bash /tmp/analyze-log.sh "$LOG" "${{ matrix.format }}" "${{ matrix.arch }}"
+
+        if [ "$RC" -ne 0 ]; then
+          echo "完整日志请下载 artifact: debug-log-${{ matrix.format }}-${{ matrix.arch }}"
+        fi
+        exit "$RC"
+
+    - name: Prepare tarxz helper templates
+      if: matrix.format == 'tarxz'
+      run: |
+        mkdir -p /tmp/tarxz-helpers
+
+        cat > /tmp/tarxz-helpers/install.sh.tpl <<'TPL_INSTALL_EOF'
+        #!/bin/sh
+        # Auto-generated installer for kernel __KVER__
+        # Works with any POSIX-compatible shell: sh, bash, dash, ash, ksh, zsh
+
+        set -e
+
+        KVER="__KVER__"
+        SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+        usage() {
+            echo "Usage: $0 [options]"
+            echo ""
+            echo "Install kernel $KVER to /boot and /lib/modules."
+            echo ""
+            echo "Options:"
+            echo "  -h, --help    Show this help"
+            exit 0
+        }
+
+        for arg in "$@"; do
+            case "$arg" in
+                -h|--help) usage ;;
+                *) echo "Unknown option: $arg" >&2; usage ;;
+            esac
+        done
+
+        if [ "$(id -u)" != "0" ]; then
+            echo "ERROR: this script must be run as root" >&2
+            echo "Try: sudo $0" >&2
+            exit 1
+        fi
+
+        if [ ! -d "$SCRIPT_DIR/boot" ]; then
+            echo "ERROR: $SCRIPT_DIR/boot not found" >&2
+            exit 1
+        fi
+
+        echo "==> Installing boot files to /boot ..."
+        mkdir -p /boot
+        for f in "$SCRIPT_DIR"/boot/*; do
+            [ -f "$f" ] || continue
+            name="$(basename "$f")"
+            echo "    /boot/$name"
+            cp -a "$f" "/boot/$name"
+        done
+
+        MODSRC="$SCRIPT_DIR/lib/modules/$KVER"
+        if [ -d "$MODSRC" ]; then
+            echo "==> Installing modules to /lib/modules/$KVER ..."
+            mkdir -p /lib/modules
+            rm -rf "/lib/modules/$KVER"
+            cp -a "$MODSRC" "/lib/modules/$KVER"
+            if command -v depmod >/dev/null 2>&1; then
+                depmod "$KVER" || echo "WARNING: depmod failed" >&2
+            fi
+        fi
+
+        echo "==> Updating bootloader (best-effort) ..."
+        if command -v update-grub >/dev/null 2>&1; then
+            update-grub || true
+        elif command -v grub-mkconfig >/dev/null 2>&1; then
+            grub-mkconfig -o /boot/grub/grub.cfg || true
+        elif command -v grub2-mkconfig >/dev/null 2>&1; then
+            grub2-mkconfig -o /boot/grub2/grub.cfg || true
+        elif [ -d /boot/loader/entries ] && command -v bootctl >/dev/null 2>&1; then
+            bootctl update || true
+        fi
+
+        echo ""
+        echo "==> Kernel $KVER installed successfully."
+        TPL_INSTALL_EOF
+
+        cat > /tmp/tarxz-helpers/uninstall.sh.tpl <<'TPL_UNINSTALL_EOF'
+        #!/bin/sh
+        # Auto-generated uninstaller for kernel __KVER__
+        # Works with any POSIX-compatible shell: sh, bash, dash, ash, ksh, zsh
+
+        set -e
+
+        KVER="__KVER__"
+        SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+        usage() {
+            echo "Usage: $0 [options]"
+            echo ""
+            echo "Remove kernel $KVER from /boot and /lib/modules."
+            echo ""
+            echo "Options:"
+            echo "  -h, --help    Show this help"
+            echo "  -y, --yes     Do not ask for confirmation"
+            exit 0
+        }
+
+        ASSUME_YES=0
+        for arg in "$@"; do
+            case "$arg" in
+                -h|--help) usage ;;
+                -y|--yes) ASSUME_YES=1 ;;
+                *) echo "Unknown option: $arg" >&2; usage ;;
+            esac
+        done
+
+        if [ "$(id -u)" != "0" ]; then
+            echo "ERROR: this script must be run as root" >&2
+            echo "Try: sudo $0" >&2
+            exit 1
+        fi
+
+        CURRENT="$(uname -r)"
+        case "$CURRENT" in
+            "$KVER"|"$KVER".*)
+                echo "WARNING: you are currently running kernel $CURRENT" >&2
+                if [ "$ASSUME_YES" != "1" ]; then
+                    printf "Continue removing kernel %s? [y/N] " "$KVER" >&2
+                    read -r answer
+                    case "$answer" in
+                        y|Y|yes|YES) ;;
+                        *) echo "Aborted."; exit 1 ;;
+                    esac
+                fi
+                ;;
+        esac
+
+        if [ -d "$SCRIPT_DIR/boot" ]; then
+            for f in "$SCRIPT_DIR"/boot/*; do
+                [ -f "$f" ] || continue
+                name="$(basename "$f")"
+                if [ -f "/boot/$name" ]; then
+                    echo "    /boot/$name"
+                    rm -f "/boot/$name"
+                fi
+            done
+        fi
+
+        if [ -d "/lib/modules/$KVER" ]; then
+            echo "==> Removing /lib/modules/$KVER"
+            rm -rf "/lib/modules/$KVER"
+        fi
+
+        if command -v update-grub >/dev/null 2>&1; then
+            update-grub || true
+        elif command -v grub-mkconfig >/dev/null 2>&1; then
+            grub-mkconfig -o /boot/grub/grub.cfg || true
+        elif command -v grub2-mkconfig >/dev/null 2>&1; then
+            grub2-mkconfig -o /boot/grub2/grub.cfg || true
+        elif [ -d /boot/loader/entries ] && command -v bootctl >/dev/null 2>&1; then
+            bootctl update || true
+        fi
+
+        echo ""
+        echo "==> Kernel $KVER uninstalled."
+        TPL_UNINSTALL_EOF
+
+        cat > /tmp/tarxz-helpers/README.md.tpl <<'TPL_README_EOF'
+        # Linux Kernel __KVER__ (__ARCH__)
+
+        ## Content
+
+            boot/vmlinuz-__KVER__
+            boot/System.map-__KVER__
+            boot/config-__KVER__
+            lib/modules/__KVER__/
+            install-__KVER__.sh
+            uninstall-__KVER__.sh
+            README.md
+
+        ## Install
+
+            sudo ./install-__KVER__.sh
+
+        ## Uninstall
+
+            sudo ./uninstall-__KVER__.sh
+            # or skip confirmation
+            sudo ./uninstall-__KVER__.sh -y
+
+        **Never touches any other kernel.**
+        TPL_README_EOF
+
+        ls -la /tmp/tarxz-helpers/
+
     - name: Build kernel packages (tar.xz)
       if: matrix.format == 'tarxz'
       env:
@@ -171,3 +706,66 @@
           echo "完整日志请下载 artifact: debug-log-${{ matrix.format }}-${{ matrix.arch }}"
         fi
         exit "$RC"
+
+    - name: Collect artifacts
+      if: always() && !cancelled()
+      run: |
+        mkdir -p dist
+        case "${{ matrix.format }}" in
+          deb)
+            find kernel-source/.. -maxdepth 1 -type f -name 'linux-image-*.deb' \
+              ! -name '*-dbg_*.deb' -exec mv {} dist/ \; 2>/dev/null || true
+            find kernel-source/.. -maxdepth 1 -type f -name 'linux-headers-*.deb' \
+              -exec mv {} dist/ \; 2>/dev/null || true
+            ;;
+          rpm)
+            find kernel-source/rpmbuild/RPMS -type f -name '*.rpm' \
+              -exec mv {} dist/ \; 2>/dev/null || true
+            ;;
+          tarxz)
+            ;;
+        esac
+        echo "──── collected ────"
+        ls -lh dist/ || true
+
+    - name: Upload kernel artifacts
+      if: always() && !cancelled() && hashFiles('dist/**') != ''
+      uses: actions/upload-artifact@v4
+      with:
+        name: kernel-${{ matrix.format }}-${{ matrix.arch }}
+        path: dist/*
+        if-no-files-found: warn
+        retention-days: 7
+
+    - name: Upload debug logs (all formats)
+      if: always() && !cancelled() && hashFiles('dist-debug/**') != ''
+      uses: actions/upload-artifact@v4
+      with:
+        name: debug-log-${{ matrix.format }}-${{ matrix.arch }}
+        path: dist-debug/*
+        if-no-files-found: warn
+        retention-days: 7
+
+  publish:
+    needs: build
+    if: inputs.release_tag != ''
+    runs-on: ubuntu-latest
+    concurrency:
+      group: release-${{ inputs.release_tag }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: kernel-*
+          merge-multiple: true
+      - run: |
+          ls -lh dist/
+          test -n "$(find dist -maxdepth 1 -type f -print -quit)"
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.release_tag }}
+          name: ${{ inputs.release_tag }}
+          files: dist/*
+          generate_release_notes: true
+          overwrite_files: true
