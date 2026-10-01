@@ -43,12 +43,17 @@ on:
         type: string
         required: false
         default: ''
+      respect_config:
+        description: '严格尊重仓库中的 .config：不执行 olddefconfig、不做 CONFIG_* 修补（仓库自带 config 请保持 true）'
+        type: boolean
+        required: false
+        default: true
       kernel_repo:
         description: '内核源码仓库 URL'
         required: true
         default: 'https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux-stable.git'
       kernel_ref:
-        description: '分支或 tag（如 v7.2.6 / v6.12.5-zen1 / master）。留空则自动使用该仓库最新版本'
+        description: '分支或 tag（如 v6.12.6 / v6.12.5-zen1）。留空则自动取该仓库最新 stable 版本'
         required: false
         default: ''
       release_tag:
@@ -108,6 +113,7 @@ jobs:
           INPUT_REF="${{ inputs.kernel_ref }}"
           REPO="${{ inputs.kernel_repo }}"
 
+          # 1) 显式指定：直接用
           if [ -n "$INPUT_REF" ]; then
             echo "kernel_ref=$INPUT_REF" >> "$GITHUB_OUTPUT"
             exit 0
@@ -115,22 +121,45 @@ jobs:
 
           echo "Auto-detecting latest ref from: $REPO"
 
-          # 通用版本号：允许上游 v6.12.5，也允许下游 v6.12.5-zen1 / 6.12.5-xanmod1 / 6.12.5-1-cachyos
-          PATTERN='^v?[0-9]+\.[0-9]+(\.[0-9]+)?(-[0-9A-Za-z._-]+)?$'
+          # 2) 官方 stable 仓库：只认严格的稳定版 tag vX.Y.Z
+          #    linux-stable.git 同时含 mainline / rc / next 等 tag，
+          #    若按版本排序会错误地取到 v7.0-rcN 之类的主线版本。
+          if echo "$REPO" | grep -Eq '(^|/)linux-stable(\.git)?$'; then
+            echo "==> Stable repo detected: only vX.Y.Z tags are candidates"
 
-          LATEST=$(git ls-remote --tags --refs --sort=-v:refname "$REPO" 2>/dev/null \
+            STABLE=$(git ls-remote --tags --refs "$REPO" 2>/dev/null \
+              | awk -F/ '{print $NF}' \
+              | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
+              | sort -Vr \
+              | head -1 || true)
+
+            if [ -n "$STABLE" ]; then
+              echo "Resolved stable ref: $STABLE"
+              echo "kernel_ref=$STABLE" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+
+            echo "ERROR: no stable vX.Y.Z tag found in $REPO" >&2
+            exit 1
+          fi
+
+          # 3) 下游仓库（zen / xanmod / cachyos 等）：允许带后缀的版本号
+          PATTERN='^v[0-9]+\.[0-9]+(\.[0-9]+)?(-[0-9A-Za-z._]+)?$'
+
+          LATEST=$(git ls-remote --tags --refs "$REPO" 2>/dev/null \
             | awk -F/ '{print $NF}' \
             | grep -E "$PATTERN" \
+            | sort -Vr \
             | head -1 || true)
 
-          # 兜底 1：没有任何符合模式 tag（比如 Liquorix 只用分支）→ 取默认分支
+          # 兜底 1：无任何版本 tag（如只推分支的仓库）→ 取默认分支
           if [ -z "$LATEST" ]; then
             echo "WARNING: no version-like tags found, falling back to default branch" >&2
             LATEST=$(git ls-remote --symref "$REPO" HEAD 2>/dev/null \
               | awk '/^ref:/ {sub("refs/heads/","",$2); print $2; exit}')
           fi
 
-          # 兜底 2：HEAD 是 detached，直接拿 SHA
+          # 兜底 2：HEAD detached，直接取 SHA
           if [ -z "$LATEST" ]; then
             LATEST=$(git ls-remote "$REPO" HEAD 2>/dev/null | awk '{print $1; exit}')
           fi
@@ -152,11 +181,12 @@ jobs:
 
     - name: Show build target
       run: |
-        echo "Arch:    ${{ matrix.arch }}"
-        echo "Formats: ${{ join(matrix.formats, ', ') }}"
-        echo "Repo:    ${{ inputs.kernel_repo }}"
-        echo "Ref:     ${{ needs.resolve-ref.outputs.kernel_ref }}"
-        echo "Runner:  ${{ runner.os }} / ${{ runner.arch }}"
+        echo "Arch:       ${{ matrix.arch }}"
+        echo "Formats:     ${{ join(matrix.formats, ', ') }}"
+        echo "Repo:        ${{ inputs.kernel_repo }}"
+        echo "Ref:         ${{ needs.resolve-ref.outputs.kernel_ref }}"
+        echo "Respect cfg: ${{ inputs.respect_config }}"
+        echo "Runner:      ${{ runner.os }} / ${{ runner.arch }}"
 
     - name: Set arch variables
       id: arch
@@ -219,10 +249,6 @@ jobs:
           CHOICE="$CUSTOM"
         fi
 
-        # 判断配置来源类型
-        IS_KERNEL_TARGET=false
-        IS_DISTRO_URL=false
-
         if [[ "$CHOICE" == http://* ]] || [[ "$CHOICE" == https://* ]]; then
           echo "==> Source: URL: $CHOICE"
           curl -fSL "$CHOICE" -o "$CONFIG_OUT" || { echo "ERROR: download $CHOICE failed" >&2; exit 1; }
@@ -230,7 +256,6 @@ jobs:
           TARGET="${CHOICE#make:}"
           echo "==> Source: kernel make target: make $TARGET"
           ( cd kernel-source && make ARCH="$KARCH" "$TARGET" && cp .config "$CONFIG_OUT" )
-          IS_KERNEL_TARGET=true
         elif [ -f "$CHOICE" ]; then
           echo "==> Source: repo file: $CHOICE"
           cp "$CHOICE" "$CONFIG_OUT"
@@ -243,9 +268,7 @@ jobs:
           make ARCH="$KARCH" "$CHOICE"
           cp .config "$CONFIG_OUT"
           cd ..
-          IS_KERNEL_TARGET=true
         else
-          IS_DISTRO_URL=true
           case "$CHOICE" in
             alma)     URL='https://git.almalinux.org/rpms/kernel/-/raw/c9/f/kernel-x86_64-fedora.config' ;;
             alpine)   URL='https://gitlab.alpinelinux.org/alpine/aports/-/raw/master/main/linux-lts/config-lts.x86_64' ;;
@@ -293,33 +316,35 @@ jobs:
         fi
 
         [ -s "$CONFIG_OUT" ] || { echo "ERROR: empty config" >&2; exit 1; }
-        echo "config lines: $(wc -l < "$CONFIG_OUT")"
+        echo "config lines (source): $(wc -l < "$CONFIG_OUT")"
 
         cd kernel-source
         cp "$CONFIG_OUT" .config
 
-        # 核心修改：
-        # - 只有内核自带 target / 发行版 config 才执行 olddefconfig
-        # - 仓库文件 / URL 配置保持原样，避免模块数量被自动补全膨胀
-        if [ "$IS_KERNEL_TARGET" = "true" ] || [ "$IS_DISTRO_URL" = "true" ]; then
-          echo "==> Running olddefconfig to stabilize config"
-          make ARCH="$KARCH" olddefconfig </dev/null
-        else
-          echo "==> Skipping olddefconfig to preserve exact config"
-        fi
-
-        # 编译兼容性处理：把 ld 的 orphan-section 警告降级，
-        # 避免某些发行版 config + 新版 binutils 直接把编译打断。
-        # 这是最小、可控的兼容性修改，不改变功能配置。
-        if ! grep -qx 'CONFIG_LD_ORPHAN_WARN_LEVEL="warn"' .config; then
+        # respect_config=true（默认）：
+        #   仓库自带 / 用户提供的 .config 已经是完整且经过验证的，
+        #   任何 olddefconfig 都会把未显式声明的选项按默认值展开，
+        #   导致大量 =m 被悄悄打开 → 包体积从 ~50MB 膨胀到 ~200MB。
+        #   因此这里什么都不做，编译时 make 会按需提示缺失项。
+        #
+        # respect_config=false：
+        #   用于「发行版碎片 config / 跨版本 config」等不完整来源，
+        #   此时才允许 olddefconfig 补全 + ld orphan 警告降级。
+        if [ "${{ inputs.respect_config }}" != "true" ]; then
+          echo "==> [compat] running olddefconfig (respect_config=false)"
           sed -i '/^CONFIG_LD_ORPHAN_WARN_LEVEL=/d' .config
           echo 'CONFIG_LD_ORPHAN_WARN_LEVEL="warn"' >> .config
+          make ARCH="$KARCH" olddefconfig </dev/null
+        else
+          echo "==> [strict] .config is used as-is, no mutation"
         fi
 
         echo ""
         echo "════════ .config summary ════════"
-        echo "config lines after processing: $(wc -l < .config)"
-        echo "════════ end ════════"
+        echo "config lines final : $(wc -l < .config)"
+        echo "modules (=m)       : $(grep -c '=m$' .config || true)"
+        echo "built-ins (=y)     : $(grep -c '=y$' .config || true)"
+        echo "════════ end ══════"
 
     - name: Compile kernel
       run: |
@@ -344,31 +369,50 @@ jobs:
         echo "STAGE=$STAGE" >> "$GITHUB_ENV"
         echo "KVER=$KVER"   >> "$GITHUB_ENV"
 
-        mkdir -p "$STAGE/image/boot"
+        mkdir -p "$STAGE/boot"
         [ -f "$KIMAGE" ] || { echo "ERROR: image not found: $KIMAGE" >&2; exit 1; }
-        cp "$KIMAGE"   "$STAGE/image/boot/vmlinuz-${KVER}"
-        cp System.map  "$STAGE/image/boot/System.map-${KVER}"
-        cp .config     "$STAGE/image/boot/config-${KVER}"
+        cp "$KIMAGE"   "$STAGE/boot/vmlinuz-${KVER}"
+        cp System.map  "$STAGE/boot/System.map-${KVER}"
+        cp .config     "$STAGE/boot/config-${KVER}"
 
-        # headers 暂存目录：最终结构是 lib/modules/<kver>/build
-        mkdir -p "$STAGE/headers/lib/modules/${KVER}/build"
-        make ARCH="$KARCH" headers_install INSTALL_HDR_PATH="$STAGE/headers/usr"
-
-        # 安装 modules 到临时目录，后续用于 headers 的 build 符号链接和模块包
-        MOD_STAGE="$STAGE/modules"
-        make ARCH="$KARCH" modules_install INSTALL_MOD_PATH="$MOD_STAGE"
-
-        # 保留 modules 目录，但移除 build/source 符号链接，
-        # 这些链接将在 headers 包中指向 /usr/src/linux-headers-<kver>
-        rm -f "$MOD_STAGE/lib/modules/${KVER}/build"
-        rm -f "$MOD_STAGE/lib/modules/${KVER}/source"
+        make ARCH="$KARCH" modules_install INSTALL_MOD_PATH="$STAGE"
+        rm -f "$STAGE/lib/modules/${KVER}/build" "$STAGE/lib/modules/${KVER}/source"
 
         echo ""
         echo "──── STAGE layout ────"
-        ls -la "$STAGE"
-        echo "──── image/boot/ ────"
-        ls -la "$STAGE/image/boot"
+        find "$STAGE" -maxdepth 3 -type d | sort > /tmp/stage-list.txt 2>&1 || true
+        head -30 /tmp/stage-list.txt || true
+        echo "──── boot/ ────"
+        ls -la "$STAGE/boot"
 
+    - name: Stage headers
+      id: headers
+      run: |
+        set -euo pipefail
+        cd kernel-source
+        KARCH="${{ steps.arch.outputs.karch }}"
+        KVER="$KVER"
+
+        HDR_STAGE="$(mktemp -d)"
+        echo "HDR_STAGE=$HDR_STAGE" >> "$GITHUB_ENV"
+
+        HDR_DIR="$HDR_STAGE/usr/src/linux-headers-${KVER}"
+        mkdir -p "$HDR_DIR"
+
+        echo "==> Copying headers ..."
+        # 外部模块编译的硬依赖
+        cp -a include "$HDR_DIR/"
+        cp -a scripts "$HDR_DIR/"
+        cp Makefile .config "$HDR_DIR/"
+        [ -d arch ] && cp -a arch "$HDR_DIR/"
+
+        # 补齐散落在源码树中的 arch/ 相关头文件（部分模块需要）
+        find . -path './arch/*/include/*' -name '*.h' -exec cp --parents {} "$HDR_DIR/" \; 2>/dev/null || true
+
+        echo "──── headers size ────"
+        du -sh "$HDR_DIR"
+
+    # ==================== deb：拆成 image + headers ====================
     - name: Package as deb
       if: contains(matrix.formats, 'deb')
       run: |
@@ -378,64 +422,70 @@ jobs:
 
         mkdir -p dist/deb
 
-        # ===== linux-image-<kver> =====
-        STAGE_IMAGE="$(mktemp -d)/linux-image-${KVER}"
-        mkdir -p "$STAGE_IMAGE/DEBIAN"
-        cp -a "$STAGE/image/boot" "$STAGE_IMAGE/"
+        # ---------- linux-image-<kver>：vmlinuz + System.map + config + modules ----------
+        IMG_DIR="$(mktemp -d)/linux-image-${KVER}"
+        mkdir -p "$IMG_DIR/DEBIAN"
+        cp -a "$STAGE/boot" "$IMG_DIR/"
+        cp -a "$STAGE/lib"  "$IMG_DIR/"
 
-        cat > "$STAGE_IMAGE/DEBIAN/control" <<EOF
+        cat > "$IMG_DIR/DEBIAN/control" <<EOF
         Package: linux-image-${KVER}
-        Version: ${KVER}-1
+        Version: 1
         Section: kernel
         Priority: optional
         Architecture: ${DEB_ARCH}
         Maintainer: CI <ci@example.com>
-        Description: Linux kernel image ${KVER}
+        Description: Linux kernel ${KVER} (image + modules)
+         Custom built kernel image, System.map, config and loadable modules.
         EOF
 
-        cat > "$STAGE_IMAGE/DEBIAN/postinst" <<EOF
+        cat > "$IMG_DIR/DEBIAN/postinst" <<'EOF'
         #!/bin/sh
         set -e
-        if command -v depmod >/dev/null 2>&1; then
-            depmod ${KVER} || :
+        KVER="$(basename "$(readlink -f /boot/vmlinuz-*)" | sed 's/^vmlinuz-//')"
+        for v in $(ls /lib/modules 2>/dev/null); do
+            depmod "$v" >/dev/null 2>&1 || :
+        done
+        if command -v update-initramfs >/dev/null 2>&1; then
+            update-initramfs -c -k "${KVER}" >/dev/null 2>&1 || :
         fi
         EOF
-        chmod 755 "$STAGE_IMAGE/DEBIAN/postinst"
+        chmod 755 "$IMG_DIR/DEBIAN/postinst"
 
-        ( cd "$STAGE_IMAGE" && \
+        ( cd "$IMG_DIR" && \
           find . -type f ! -path './DEBIAN/*' -exec md5sum {} + \
             | sed 's| \./| |' > DEBIAN/md5sums )
 
-        dpkg-deb --root-owner-group --build "$STAGE_IMAGE" \
-          "dist/deb/linux-image-${KVER}_${KVER}-1_${DEB_ARCH}.deb"
+        dpkg-deb --root-owner-group --build "$IMG_DIR" \
+          "dist/deb/linux-image-${KVER}_1_${DEB_ARCH}.deb"
 
-        # ===== linux-headers-<kver> =====
-        STAGE_HEADERS="$(mktemp -d)/linux-headers-${KVER}"
-        mkdir -p "$STAGE_HEADERS/DEBIAN"
-        cp -a "$STAGE/headers/lib" "$STAGE_HEADERS/"
-        cp -a "$STAGE/headers/usr" "$STAGE_HEADERS/usr"
+        # ---------- linux-headers-<kver>：headers + scripts + Makefile ----------
+        HDR_DIR_DEB="$(mktemp -d)/linux-headers-${KVER}"
+        mkdir -p "$HDR_DIR_DEB/DEBIAN"
+        cp -a "$HDR_STAGE/usr" "$HDR_DIR_DEB/usr"
 
-        cat > "$STAGE_HEADERS/DEBIAN/control" <<EOF
+        cat > "$HDR_DIR_DEB/DEBIAN/control" <<EOF
         Package: linux-headers-${KVER}
-        Version: ${KVER}-1
+        Version: 1
         Section: kernel
         Priority: optional
         Architecture: ${DEB_ARCH}
         Maintainer: CI <ci@example.com>
-        Depends: libc6-dev | libc-dev
-        Description: Linux kernel headers ${KVER}
+        Description: Linux kernel headers for ${KVER}
+         Header files required to build out-of-tree kernel modules.
         EOF
 
-        ( cd "$STAGE_HEADERS" && \
+        ( cd "$HDR_DIR_DEB" && \
           find . -type f ! -path './DEBIAN/*' -exec md5sum {} + \
             | sed 's| \./| |' > DEBIAN/md5sums )
 
-        dpkg-deb --root-owner-group --build "$STAGE_HEADERS" \
-          "dist/deb/linux-headers-${KVER}_${KVER}-1_${DEB_ARCH}.deb"
+        dpkg-deb --root-owner-group --build "$HDR_DIR_DEB" \
+          "dist/deb/linux-headers-${KVER}_1_${DEB_ARCH}.deb"
 
         echo "──── deb artifacts ────"
         ls -lh dist/deb/
 
+    # ==================== rpm：拆成 image + headers ====================
     - name: Package as rpm
       if: contains(matrix.formats, 'rpm')
       run: |
@@ -447,13 +497,12 @@ jobs:
         RPM_DIR="$(mktemp -d)"
         mkdir -p "$RPM_DIR"/{BUILD,RPMS,SOURCES,SPECS,BUILDROOT}
 
-        # ===== kernel-image spec =====
-        SPEC_IMAGE="$RPM_DIR/SPECS/kernel-image.spec"
-        cat > "$SPEC_IMAGE" <<EOF
+        # ---------- kernel-image ----------
+        cat > "$RPM_DIR/SPECS/kernel-image.spec" <<EOF
         Name:           kernel-image
         Version:        ${RPM_VERSION}
         Release:        1
-        Summary:        Linux kernel image ${KVER}
+        Summary:        Linux kernel ${KVER} (image + modules)
         License:        GPL-2.0-only
         AutoReqProv:    no
         BuildArch:      ${RPM_ARCH}
@@ -462,30 +511,32 @@ jobs:
         %global __os_install_post %{nil}
 
         %description
-        Linux kernel image ${KVER}.
+        Custom Linux kernel ${KVER}: vmlinuz, System.map, config and modules.
 
         %install
         mkdir -p %{buildroot}
-        cp -a ${STAGE}/image/. %{buildroot}/
+        cp -a ${STAGE}/. %{buildroot}/
 
         %files
         /boot/vmlinuz-*
         /boot/System.map-*
         /boot/config-*
+        /lib/modules/*
 
         %post
-        /sbin/depmod ${KVER} >/dev/null 2>&1 || :
+        for v in $(ls /lib/modules 2>/dev/null); do
+            /sbin/depmod "$v" >/dev/null 2>&1 || :
+        done
         EOF
 
-        rpmbuild --define "_topdir $RPM_DIR" -bb "$SPEC_IMAGE"
+        rpmbuild --define "_topdir $RPM_DIR" -bb "$RPM_DIR/SPECS/kernel-image.spec"
 
-        # ===== kernel-headers spec =====
-        SPEC_HEADERS="$RPM_DIR/SPECS/kernel-headers.spec"
-        cat > "$SPEC_HEADERS" <<EOF
+        # ---------- kernel-headers ----------
+        cat > "$RPM_DIR/SPECS/kernel-headers.spec" <<EOF
         Name:           kernel-headers
         Version:        ${RPM_VERSION}
         Release:        1
-        Summary:        Linux kernel headers ${KVER}
+        Summary:        Linux kernel headers for ${KVER}
         License:        GPL-2.0-only
         AutoReqProv:    no
         BuildArch:      ${RPM_ARCH}
@@ -494,18 +545,18 @@ jobs:
         %global __os_install_post %{nil}
 
         %description
-        Linux kernel headers ${KVER}.
+        Header files required to build out-of-tree kernel modules
+        against kernel ${KVER}.
 
         %install
         mkdir -p %{buildroot}
-        cp -a ${STAGE}/headers/. %{buildroot}/
+        cp -a ${HDR_STAGE}/. %{buildroot}/
 
         %files
-        /usr/include/*
-        /lib/modules/*
+        /usr/src/linux-headers-${KVER}
         EOF
 
-        rpmbuild --define "_topdir $RPM_DIR" -bb "$SPEC_HEADERS"
+        rpmbuild --define "_topdir $RPM_DIR" -bb "$RPM_DIR/SPECS/kernel-headers.spec"
 
         mkdir -p dist/rpm
         find "$RPM_DIR/RPMS" -name '*.rpm' -exec cp {} dist/rpm/ \;
@@ -513,6 +564,7 @@ jobs:
         echo "──── rpm artifacts ────"
         ls -lh dist/rpm/
 
+    # ==================== tar.xz：保持通用单包 + 安装/卸载脚本 ====================
     - name: Prepare tarxz helper templates
       if: contains(matrix.formats, 'tarxz')
       run: |
@@ -521,7 +573,7 @@ jobs:
         cat > /tmp/tarxz-helpers/install.sh.tpl <<'TPL_INSTALL_EOF'
         #!/bin/sh
         # Auto-generated installer for kernel __KVER__
-        # Works with any POSIX-compatible shell: sh, bash, dash, ash, ksh, zsh
+        # POSIX-compatible: sh, bash, dash, ash, ksh, zsh
 
         set -e
 
@@ -594,7 +646,7 @@ jobs:
         cat > /tmp/tarxz-helpers/uninstall.sh.tpl <<'TPL_UNINSTALL_EOF'
         #!/bin/sh
         # Auto-generated uninstaller for kernel __KVER__
-        # Works with any POSIX-compatible shell: sh, bash, dash, ash, ksh, zsh
+        # POSIX-compatible: sh, bash, dash, ash, ksh, zsh
 
         set -e
 
@@ -630,7 +682,7 @@ jobs:
         CURRENT="$(uname -r)"
         case "$CURRENT" in
             "$KVER"|"$KVER".*)
-                echo "WARNING: you are currently running kernel $KVER" >&2
+                echo "WARNING: you are currently running kernel $CURRENT" >&2
                 if [ "$ASSUME_YES" != "1" ]; then
                     printf "Continue removing kernel %s? [y/N] " "$KVER" >&2
                     read -r answer
@@ -712,8 +764,8 @@ jobs:
         PKG_ROOT="$STAGE_PARENT/$PKG_DIR"
         mkdir -p "$PKG_ROOT"
 
-        cp -a "$STAGE/image/boot" "$PKG_ROOT/"
-        cp -a "$STAGE/modules/lib"  "$PKG_ROOT/"
+        cp -a "$STAGE/boot" "$PKG_ROOT/"
+        cp -a "$STAGE/lib"  "$PKG_ROOT/"
 
         TPL_DIR=/tmp/tarxz-helpers
         [ -d "$TPL_DIR" ] || { echo "FATAL: templates not found" >&2; exit 1; }
@@ -734,6 +786,7 @@ jobs:
         head -20 /tmp/tarxz-list.txt || true
         ls -lh "dist/tarxz/$OUTNAME"
 
+    # ==================== pkg.tar.zst：拆成 image + headers ====================
     - name: Package as pkg.tar.zst
       if: contains(matrix.formats, 'pkg')
       run: |
@@ -741,67 +794,57 @@ jobs:
         ARCH="${{ matrix.arch }}"
         KVER="$KVER"
 
-        # ===== linux-image =====
-        PKG_IMAGE="$(mktemp -d)"
-        cp -a "$STAGE/image/boot" "$PKG_IMAGE/boot"
-
-        cat > "$PKG_IMAGE/.PKGINFO" <<EOF
-        pkgname = linux-image
-        pkgbase = linux-image
-        pkgver = ${KVER}-1
-        pkgdesc = Linux kernel image ${KVER}
-        url = https://kernel.org
-        builddate = $(date +%s)
-        packager = CI <ci@example.com>
-        size = $(du -sb "$PKG_IMAGE" | cut -f1)
-        arch = ${ARCH}
-        license = GPL-2.0-only
-        EOF
-
-        cat > "$PKG_IMAGE/.INSTALL" <<EOF
-        post_install() {
-            /sbin/depmod ${KVER} >/dev/null 2>&1 || :
-        }
-        post_upgrade() {
-            post_install
-        }
-        pre_remove() {
-            :
-        }
-        post_remove() {
-            :
-        }
-        EOF
-
         mkdir -p dist/pkg
-        OUTNAME_IMAGE="linux-image-${KVER}-1-${ARCH}.pkg.tar.zst"
-        ( cd "$PKG_IMAGE" && tar --owner=0 --group=0 -cf - . \
-          | zstd -T0 -19 -o "$OLDPWD/dist/pkg/$OUTNAME_IMAGE" -f )
 
-        # ===== linux-headers =====
-        PKG_HEADERS="$(mktemp -d)"
-        mkdir -p "$PKG_HEADERS/lib/modules"
-        cp -a "$STAGE/headers/lib/modules/${KVER}" "$PKG_HEADERS/lib/modules/"
-        cp -a "$PKG_HEADERS/lib/modules/${KVER}/build/usr" "$PKG_HEADERS/usr"
-        rm -rf "$PKG_HEADERS/lib/modules/${KVER}/build/usr"
+        # ---------- linux-image ----------
+        IMG_ROOT="$(mktemp -d)"
+        cp -a "$STAGE/boot" "$IMG_ROOT/"
+        cp -a "$STAGE/lib"  "$IMG_ROOT/"
 
-        cat > "$PKG_HEADERS/.PKGINFO" <<EOF
-        pkgname = linux-headers
-        pkgbase = linux-headers
+        cat > "$IMG_ROOT/.PKGINFO" <<EOF
+        pkgname = linux-image
+        pkgbase = linux
         pkgver = ${KVER}-1
-        pkgdesc = Linux kernel headers ${KVER}
+        pkgdesc = Linux kernel ${KVER} (image + modules)
         url = https://kernel.org
         builddate = $(date +%s)
         packager = CI <ci@example.com>
-        size = $(du -sb "$PKG_HEADERS" | cut -f1)
+        size = $(du -sb "$IMG_ROOT" | cut -f1)
         arch = ${ARCH}
         license = GPL-2.0-only
-        depends = linux-image
         EOF
 
-        OUTNAME_HEADERS="linux-headers-${KVER}-1-${ARCH}.pkg.tar.zst"
-        ( cd "$PKG_HEADERS" && tar --owner=0 --group=0 -cf - . \
-          | zstd -T0 -19 -o "$OLDPWD/dist/pkg/$OUTNAME_HEADERS" -f )
+        cat > "$IMG_ROOT/.INSTALL" <<EOF
+        post_install() {
+            for v in $(ls /lib/modules 2>/dev/null); do
+                /sbin/depmod "$v" >/dev/null 2>&1 || :
+            done
+        }
+        post_upgrade() { post_install; }
+        EOF
+
+        ( cd "$IMG_ROOT" && tar --owner=0 --group=0 -cf - . \
+          | zstd -T0 -19 -o "$OLDPWD/dist/pkg/linux-image-${KVER}-1-${ARCH}.pkg.tar.zst" -f )
+
+        # ---------- linux-headers ----------
+        HDR_ROOT="$(mktemp -d)"
+        cp -a "$HDR_STAGE/usr" "$HDR_ROOT/usr"
+
+        cat > "$HDR_ROOT/.PKGINFO" <<EOF
+        pkgname = linux-headers
+        pkgbase = linux
+        pkgver = ${KVER}-1
+        pkgdesc = Linux kernel headers for ${KVER}
+        url = https://kernel.org
+        builddate = $(date +%s)
+        packager = CI <ci@example.com>
+        size = $(du -sb "$HDR_ROOT" | cut -f1)
+        arch = ${ARCH}
+        license = GPL-2.0-only
+        EOF
+
+        ( cd "$HDR_ROOT" && tar --owner=0 --group=0 -cf - . \
+          | zstd -T0 -19 -o "$OLDPWD/dist/pkg/linux-headers-${KVER}-1-${ARCH}.pkg.tar.zst" -f )
 
         echo "──── pkg.tar.zst artifacts ────"
         ls -lh dist/pkg/
