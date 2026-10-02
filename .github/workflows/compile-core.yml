@@ -56,7 +56,7 @@ on:
         default: 'auto'
       ccache:
         type: boolean
-        default: true
+        default: false
 
 jobs:
   compile:
@@ -69,19 +69,16 @@ jobs:
 
       - name: 清理磁盘空间
         run: |
-          set -euo pipefail
-          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost /usr/local/lib/android
-          sudo apt-get clean
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost
           df -h /
 
       - name: 安装构建依赖
         run: |
-          set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            build-essential libncurses-dev bison flex libssl-dev libelf-dev \
-            libdw-dev elfutils bc dwarves zstd cpio rsync kmod xz-utils \
-            dpkg-dev rpm git jq curl ccache clang lld llvm ca-certificates
+          sudo apt-get install -y build-essential libncurses-dev bison flex \
+            libssl-dev libelf-dev libdw-dev elfutils bc dwarves zstd cpio \
+            rsync kmod xz-utils dpkg-dev rpm git jq curl ccache \
+            clang lld llvm
 
       - name: 克隆内核源码
         run: |
@@ -99,16 +96,14 @@ jobs:
           CHOICE="${{ inputs.config_choice }}"
           CUSTOM="${{ inputs.config_custom }}"
           KARCH="${{ inputs.arch_name }}"
+          CONFIG_OUT="/tmp/kernel.config"
 
           if [ -n "$CUSTOM" ]; then
             CHOICE="$CUSTOM"
           fi
 
-          CONFIG_OUT="$(pwd)/dist/config/kernel.config"
-          mkdir -p "$(dirname "$CONFIG_OUT")"
-
           if echo "$CHOICE" | grep -qE '^https?://'; then
-            curl -fSL --retry 3 "$CHOICE" -o "$CONFIG_OUT"
+            curl -fSL "$CHOICE" -o "$CONFIG_OUT"
           elif echo "$CHOICE" | grep -qE '^make:'; then
             TARGET="${CHOICE#make:}"
             cd kernel-source
@@ -157,7 +152,7 @@ jobs:
                   URL='https://raw.githubusercontent.com/void-linux/void-packages/master/srcpkgs/linux/files/aarch64-dotconfig' ;;
               esac
             fi
-            curl -fSL --retry 3 "$URL" -o "$CONFIG_OUT"
+            curl -fSL "$URL" -o "$CONFIG_OUT"
           fi
 
           cd kernel-source
@@ -165,11 +160,11 @@ jobs:
 
           if [ "${{ inputs.respect_config }}" != "true" ]; then
             sed -i '/^CONFIG_LD_ORPHAN_WARN_LEVEL=/d' .config
-            printf '%s\n' 'CONFIG_LD_ORPHAN_WARN_LEVEL="warn"' >> .config
+            echo 'CONFIG_LD_ORPHAN_WARN_LEVEL="warn"' >> .config
             make ARCH="$KARCH" olddefconfig </dev/null
           else
-            grep -q '^CONFIG_LD_ORPHAN_WARN_LEVEL=' .config || printf '%s\n' 'CONFIG_LD_ORPHAN_WARN_LEVEL="warn"' >> .config
-            grep -q '^CONFIG_LOCALVERSION_AUTO=' .config || printf '%s\n' 'CONFIG_LOCALVERSION_AUTO=y' >> .config
+            grep -q '^CONFIG_LD_ORPHAN_WARN_LEVEL=' .config || echo 'CONFIG_LD_ORPHAN_WARN_LEVEL="warn"' >> .config
+            grep -q '^CONFIG_LOCALVERSION_AUTO=' .config || echo 'CONFIG_LOCALVERSION_AUTO=y' >> .config
           fi
 
       - name: 应用调优预设
@@ -183,44 +178,44 @@ jobs:
             performance)
               for c in NO_HZ_FULL RCU_NOCBS PREEMPT_DYNAMIC CPU_FREQ_DEFAULT_GOV_PERFORMANCE; do
                 sed -i "/^CONFIG_${c}=/d" .config
-                printf '%s\n' "CONFIG_${c}=y" >> .config
+                echo "CONFIG_${c}=y" >> .config
               done
               for c in MITIGATION_RETPOLINE MITIGATION_SPECTRE_BHI MITIGATION_IBPB_ENTRY MITIGATION_IBRS_ENTRY MITIGATION_L1TF MITIGATION_PTI; do
                 sed -i "/^CONFIG_${c}=/d" .config
-                printf '%s\n' "# CONFIG_${c} is not set" >> .config
+                echo "# CONFIG_${c} is not set" >> .config
               done
               sed -i '/^CONFIG_CPU_FREQ_DEFAULT_GOV_ONDEMAND=/d' .config
-              printf '%s\n' "# CONFIG_CPU_FREQ_DEFAULT_GOV_ONDEMAND is not set" >> .config
+              echo "# CONFIG_CPU_FREQ_DEFAULT_GOV_ONDEMAND is not set" >> .config
               ;;
             lowlatency)
               sed -i '/^CONFIG_PREEMPT_VOLUNTARY=/d' .config
               sed -i '/^CONFIG_PREEMPT_NONE=/d' .config
-              printf '%s\n' "CONFIG_PREEMPT=y" >> .config
+              echo "CONFIG_PREEMPT=y" >> .config
               sed -i '/^CONFIG_HZ_250=/d' .config
               sed -i '/^CONFIG_HZ_300=/d' .config
               sed -i '/^CONFIG_HZ_100=/d' .config
-              printf '%s\n' "CONFIG_HZ_1000=y" >> .config
+              echo "CONFIG_HZ_1000=y" >> .config
               sed -i '/^CONFIG_RCU_BOOST=/d' .config
-              printf '%s\n' "CONFIG_RCU_BOOST=y" >> .config
+              echo "CONFIG_RCU_BOOST=y" >> .config
               ;;
             minimal)
               sed -i '/^CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE=/d' .config
-              printf '%s\n' "CONFIG_CC_OPTIMIZE_FOR_SIZE=y" >> .config
+              echo "CONFIG_CC_OPTIMIZE_FOR_SIZE=y" >> .config
               for c in MODULE_SIG MODULE_SIG_ALL MODULE_SIG_FORCE; do
                 sed -i "/^CONFIG_${c}=/d" .config
-                printf '%s\n' "# CONFIG_${c} is not set" >> .config
+                echo "# CONFIG_${c} is not set" >> .config
               done
               ;;
             debugoff)
               for c in KASAN KMSAN KCSAN KFENCE KMEMLEAK DEBUG_INFO DWARF_TOOLCHAIN_DEFAULT FTRACE FUNCTION_TRACER FUNCTION_GRAPH_TRACER STACK_TRACER KPROBES UPROBES TRACEPOINTS DEBUG_FS SLUB_DEBUG DEBUG_PAGEALLOC DEBUG_KMEMLEAK DEBUG_STACK_USAGE SCHEDSTATS LATENCYTOP LOCK_STAT; do
                 sed -i "/^CONFIG_${c}=/d" .config
-                printf '%s\n' "# CONFIG_${c} is not set" >> .config
+                echo "# CONFIG_${c} is not set" >> .config
               done
               ;;
             default)
               for c in DEBUG_BUGVERBOSE DEBUG_LIST DEBUG_SG DEBUG_NOTIFIERS DEBUG_CREDENTIALS RCU_TRACE SCHED_DEBUG PRINTK_TIME DYNAMIC_DEBUG DEBUG_ATOMIC_SLEEP DEBUG_PREEMPT DEBUG_SPINLOCK DEBUG_MUTEXES DEBUG_RT_MUTEXES DEBUG_WW_MUTEX_SLOWPATH DEBUG_LOCK_ALLOC DEBUG_LOCKDEP DEBUG_KOBJECT DEBUG_KOBJECT_RELEASE; do
                 sed -i "/^CONFIG_${c}=/d" .config
-                printf '%s\n' "# CONFIG_${c} is not set" >> .config
+                echo "# CONFIG_${c} is not set" >> .config
               done
               ;;
             none)
@@ -237,22 +232,22 @@ jobs:
             sed -i '/^CONFIG_LTO=/d' .config
             sed -i '/^CONFIG_LTO_CLANG_FULL=/d' .config
             sed -i '/^CONFIG_LTO_CLANG_THIN=/d' .config
-            printf '%s\n' "CONFIG_LTO_NONE=y" >> .config
+            echo "CONFIG_LTO_NONE=y" >> .config
           else
             sed -i '/^CONFIG_LTO=/d' .config
-            printf '%s\n' "CONFIG_LTO=y" >> .config
+            echo "CONFIG_LTO=y" >> .config
             sed -i '/^CONFIG_LTO_NONE=/d' .config
-            printf '%s\n' "# CONFIG_LTO_NONE is not set" >> .config
+            echo "# CONFIG_LTO_NONE is not set" >> .config
             if [ "$LTO" = "full" ]; then
               sed -i '/^CONFIG_LTO_CLANG_FULL=/d' .config
-              printf '%s\n' "CONFIG_LTO_CLANG_FULL=y" >> .config
+              echo "CONFIG_LTO_CLANG_FULL=y" >> .config
               sed -i '/^CONFIG_LTO_CLANG_THIN=/d' .config
-              printf '%s\n' "# CONFIG_LTO_CLANG_THIN is not set" >> .config
+              echo "# CONFIG_LTO_CLANG_THIN is not set" >> .config
             else
               sed -i '/^CONFIG_LTO_CLANG_THIN=/d' .config
-              printf '%s\n' "CONFIG_LTO_CLANG_THIN=y" >> .config
+              echo "CONFIG_LTO_CLANG_THIN=y" >> .config
               sed -i '/^CONFIG_LTO_CLANG_FULL=/d' .config
-              printf '%s\n' "# CONFIG_LTO_CLANG_FULL is not set" >> .config
+              echo "# CONFIG_LTO_CLANG_FULL is not set" >> .config
             fi
           fi
 
@@ -288,69 +283,71 @@ jobs:
           fi
 
           make $MAKE_ARGS
+
           KVER="$(make ARCH="$KARCH" -s kernelrelease)"
           echo "KVER=$KVER" >> "$GITHUB_OUTPUT"
           echo "内核版本: $KVER"
 
       - name: 暂存产物
+        id: stage
         run: |
           set -euo pipefail
           cd kernel-source
           KARCH="${{ inputs.arch_name }}"
           KVER="${{ steps.compile.outputs.KVER }}"
-          KIMAGE="${{ inputs.arch_boot }}"
 
-          OUT="$(pwd)/dist/compile/${KVER}"
+          # 产物放进 workspace 内的固定目录，不用 mktemp。
+          # mktemp -d 落在 runner 的 tmpfs，属主 uid 与 upload-artifact
+          # 内部递归 scandir 的 uid 不一致，且会追进 /boot/efi 等挂载点，
+          # 触发 "EACCES: permission denied, scandir '/boot/efi'"。
+          OUT="${GITHUB_WORKSPACE}/dist/compile/${KVER}"
+          rm -rf "$OUT"
           mkdir -p "$OUT/boot" "$OUT/lib/modules"
 
-          cp "$KIMAGE" "$OUT/boot/vmlinuz-${KVER}"
-          cp System.map "$OUT/boot/System.map-${KVER}"
-          cp .config "$OUT/boot/config-${KVER}"
+          cp "${{ inputs.arch_boot }}" "$OUT/boot/vmlinuz-${KVER}"
+          cp System.map  "$OUT/boot/System.map-${KVER}"
+          cp .config     "$OUT/boot/config-${KVER}"
 
           if [ "${{ inputs.strip_modules }}" = "true" ]; then
-            make ARCH="$KARCH" modules_install INSTALL_MOD_PATH="$PWD/$OUT" INSTALL_MOD_STRIP=1
+            make ARCH="$KARCH" modules_install INSTALL_MOD_PATH="$OUT" INSTALL_MOD_STRIP=1
           else
-            make ARCH="$KARCH" modules_install INSTALL_MOD_PATH="$PWD/$OUT"
+            make ARCH="$KARCH" modules_install INSTALL_MOD_PATH="$OUT"
           fi
-          rm -f "$OUT/lib/modules/${KVER}/build" "$OUT/lib/modules/${KVER}/source"
+          rm -f "$OUT/lib/modules/${KVER}"/{build,source}
 
+          # headers 放到 OUT/headers，不进 /usr/src，避免下游解压污染工作区
           if [ "${{ inputs.include_headers }}" = "true" ]; then
             HDR="$OUT/headers"
             mkdir -p "$HDR"
             if [ "${{ inputs.headers_full_tree }}" = "true" ]; then
-              cp -a include "$HDR/"
-              cp -a scripts "$HDR/"
-              cp -a arch "$HDR/"
+              cp -a include scripts arch "$HDR/"
             else
               cp -a include "$HDR/"
-              mkdir -p "$HDR/scripts"
+              mkdir -p "$HDR/scripts" "$HDR/arch"
               for d in basic mod package recordmk kernel; do
                 if [ -d "scripts/$d" ]; then
                   cp -a "scripts/$d" "$HDR/scripts/"
                 fi
               done
-              mkdir -p "$HDR/arch"
               cp -a "arch/$KARCH" "$HDR/arch/"
             fi
             cp Makefile .config Module.symvers Kbuild "$HDR/" 2>/dev/null || true
           fi
 
-          find "$OUT" -type f | wc -l
+          echo "OUT=$OUT" >> "$GITHUB_OUTPUT"
+          find "$OUT" -mindepth 1 | head -20
           du -sh "$OUT"
 
       - name: 上传编译产物
         if: ${{ always() && !cancelled() }}
         uses: actions/upload-artifact@v4
         with:
+          # 产物粒度 = 架构。每个 arch 编译一次，产出一份 artifact。
           name: build-${{ inputs.arch }}
+          # 用 workspace 内相对路径，不含 /tmp、不含 /boot、不含 /usr/src
           path: dist/compile/**/*
           retention-days: 1
           if-no-files-found: error
           compression-level: 0
-
-      - name: 统计产物
-        if: ${{ always() && !cancelled() }}
-        run: |
-          set -euo pipefail
-          cd dist/compile
-          find . -type f -exec ls -lh {} \; | awk '{print $5, $9}'
+          overwrite: false
+          include-hidden-files: false
