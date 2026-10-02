@@ -40,33 +40,42 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: build-${{ inputs.arch }}
-          path: build
+          path: build-artifacts
 
       - name: 定位产物路径
         id: locate
         run: |
           set -euo pipefail
-          BOOT_DIR="$(find build -type d -name boot | head -1)"
-          if [ -z "$BOOT_DIR" ]; then
-            echo "ERROR: 未找到 boot 目录" >&2
-            find build -maxdepth 3 | head -20 >&2
+          SRC="build-artifacts"
+
+          VMLINUZ="$(find "$SRC" -maxdepth 4 -type f -name 'vmlinuz-*' | head -1 || true)"
+          SYSTEM_MAP="$(find "$SRC" -maxdepth 4 -type f -name 'System.map-*' | head -1 || true)"
+          CONFIG="$(find "$SRC" -maxdepth 4 -type f -name 'config-*' | head -1 || true)"
+          MODULES_KVER="$(find "$SRC" -maxdepth 4 -type d -name 'modules' -exec find {} -maxdepth 1 -mindepth 1 -type d \; | head -1 | xargs -I{} basename {} 2>/dev/null || true)"
+          MODULES_DIR="$(find "$SRC" -maxdepth 4 -type d -name 'modules' | head -1 || true)"
+          HDR_DIR="$(find "$SRC" -maxdepth 3 -type d -name 'headers' | head -1 || true)"
+
+          if [ -z "$VMLINUZ" ] || [ -z "$MODULES_DIR" ]; then
+            echo "ERROR: 产物不完整" >&2
+            find "$SRC" -maxdepth 5 | head -30 >&2
             exit 1
           fi
-          VMLINUZ="$(ls -1 "$BOOT_DIR"/vmlinuz-* 2>/dev/null | head -1 || true)"
-          SYSTEM_MAP="$(ls -1 "$BOOT_DIR"/System.map-* 2>/dev/null | head -1 || true)"
-          CONFIG="$(ls -1 "$BOOT_DIR"/config-* 2>/dev/null | head -1 || true)"
-          MODULES_DIR="$(find build -type d -name 'lib' -exec find {} -maxdepth 3 -type d -name 'modules' \; 2>/dev/null | head -1 || true)"
+
           KVER="$(basename "$VMLINUZ" | sed 's/^vmlinuz-//')"
-          HDR_DIR="$(find build -type d -name 'linux-headers-*' | head -1 || true)"
+          if [ -z "$MODULES_KVER" ]; then
+            MODULES_KVER="$KVER"
+          fi
 
           echo "VMLINUZ=$VMLINUZ" >> "$GITHUB_OUTPUT"
           echo "SYSTEM_MAP=$SYSTEM_MAP" >> "$GITHUB_OUTPUT"
           echo "CONFIG=$CONFIG" >> "$GITHUB_OUTPUT"
           echo "MODULES_DIR=$MODULES_DIR" >> "$GITHUB_OUTPUT"
+          echo "MODULES_KVER=$MODULES_KVER" >> "$GITHUB_OUTPUT"
           echo "KVER=$KVER" >> "$GITHUB_OUTPUT"
           echo "HDR=$HDR_DIR" >> "$GITHUB_OUTPUT"
 
           echo "KVER=$KVER"
+          echo "MODULES_KVER=$MODULES_KVER"
           echo "MODULES_DIR=$MODULES_DIR"
           echo "HDR=$HDR_DIR"
 
@@ -84,7 +93,7 @@ jobs:
           cp "${{ steps.locate.outputs.VMLINUZ }}" "$IMG_DIR/boot/vmlinuz-${KVER}"
           cp "${{ steps.locate.outputs.SYSTEM_MAP }}" "$IMG_DIR/boot/System.map-${KVER}"
           cp "${{ steps.locate.outputs.CONFIG }}" "$IMG_DIR/boot/config-${KVER}"
-          cp -a "${{ steps.locate.outputs.MODULES_DIR }}/${KVER}" "$IMG_DIR/lib/modules/"
+          cp -a "${{ steps.locate.outputs.MODULES_DIR }}/${{ steps.locate.outputs.MODULES_KVER }}" "$IMG_DIR/lib/modules/"
 
           printf '%s\n' \
             "Package: linux-image-${KVER}" \
@@ -102,7 +111,7 @@ jobs:
           if [ "${{ inputs.include_headers }}" = "true" ] && [ -n "${{ steps.locate.outputs.HDR }}" ]; then
             HDR_DIR="$(mktemp -d)/linux-headers-${KVER}"
             mkdir -p "$HDR_DIR/DEBIAN" "$HDR_DIR/usr/src/linux-headers-${KVER}"
-            cp -a "${{ steps.locate.outputs.HDR }}/usr/src/linux-headers-${KVER}/." "$HDR_DIR/usr/src/linux-headers-${KVER}/"
+            cp -a "${{ steps.locate.outputs.HDR }}/." "$HDR_DIR/usr/src/linux-headers-${KVER}/"
 
             printf '%s\n' \
               "Package: linux-headers-${KVER}" \
@@ -128,6 +137,7 @@ jobs:
           RPM_REL="$(echo "$KVER" | rev | cut -d'-' -f1 | rev)"
           RPM_REL="${RPM_REL}_1"
           if [ -z "$RPM_VER" ]; then RPM_VER="$KVER"; fi
+          if [ -z "$RPM_REL" ]; then RPM_REL="1"; fi
 
           TOPDIR="$(mktemp -d)"
           mkdir -p "$TOPDIR"/{BUILD,RPMS,SOURCES,SPECS,BUILDROOT}
@@ -154,7 +164,7 @@ jobs:
               '%install' \
               'rm -rf %{buildroot}' \
               "mkdir -p %{buildroot}/usr/src/linux-headers-${KVER}" \
-              "cp -a ${{ steps.locate.outputs.HDR }}/usr/src/linux-headers-${KVER}/. %{buildroot}/usr/src/linux-headers-${KVER}/" \
+              "cp -a ${{ steps.locate.outputs.HDR }}/. %{buildroot}/usr/src/linux-headers-${KVER}/" \
               '' \
               '%files' \
               '/usr/src/linux-headers-${KVER}' \
@@ -186,13 +196,13 @@ jobs:
             "cp ${{ steps.locate.outputs.VMLINUZ }} %{buildroot}/boot/vmlinuz-${KVER} 2>/dev/null || :" \
             "cp ${{ steps.locate.outputs.SYSTEM_MAP }} %{buildroot}/boot/System.map-${KVER} 2>/dev/null || :" \
             "cp ${{ steps.locate.outputs.CONFIG }} %{buildroot}/boot/config-${KVER} 2>/dev/null || :" \
-            "cp -a ${{ steps.locate.outputs.MODULES_DIR }}/${KVER} %{buildroot}/lib/modules/ 2>/dev/null || :" \
+            "cp -a ${{ steps.locate.outputs.MODULES_DIR }}/${{ steps.locate.outputs.MODULES_KVER }} %{buildroot}/lib/modules/ 2>/dev/null || :" \
             '' \
             '%files' \
             "/boot/vmlinuz-${KVER}" \
             "/boot/System.map-${KVER}" \
             "/boot/config-${KVER}" \
-            "/lib/modules/${KVER}" \
+            "/lib/modules/${{ steps.locate.outputs.MODULES_KVER }}" \
             > "$TOPDIR/SPECS/kernel-image.spec"
           rpmbuild --define "_topdir $TOPDIR" -bb "$TOPDIR/SPECS/kernel-image.spec"
 
@@ -212,18 +222,18 @@ jobs:
           cp "${{ steps.locate.outputs.VMLINUZ }}" "$PKG_ROOT/boot/vmlinuz-${KVER}"
           cp "${{ steps.locate.outputs.SYSTEM_MAP }}" "$PKG_ROOT/boot/"
           cp "${{ steps.locate.outputs.CONFIG }}" "$PKG_ROOT/boot/"
-          cp -a "${{ steps.locate.outputs.MODULES_DIR }}/${KVER}" "$PKG_ROOT/lib/modules/"
+          cp -a "${{ steps.locate.outputs.MODULES_DIR }}/${{ steps.locate.outputs.MODULES_KVER }}" "$PKG_ROOT/lib/modules/"
 
           if [ "${{ inputs.include_headers }}" = "true" ] && [ "${{ inputs.tarxz_include_headers }}" = "true" ] && [ -n "${{ steps.locate.outputs.HDR }}" ]; then
-            mkdir -p "$PKG_ROOT/usr/src"
-            cp -a "${{ steps.locate.outputs.HDR }}/usr/src/linux-headers-${KVER}" "$PKG_ROOT/usr/src/"
+            mkdir -p "$PKG_ROOT/usr/src/linux-headers-${KVER}"
+            cp -a "${{ steps.locate.outputs.HDR }}/." "$PKG_ROOT/usr/src/linux-headers-${KVER}/"
           fi
 
           printf '%s\n' \
             '#!/bin/sh' \
             'set -e' \
             '[ "$(id -u)" = "0" ] || { echo "请 root 运行" >&2; exit 1; }' \
-            'KVER_SUB="__KVER__"' \
+            "KVER_SUB=\"${KVER}\"" \
             'cp -a boot/* /boot/ 2>/dev/null || true' \
             'cp -a "lib/modules/${KVER_SUB}" /lib/modules/ 2>/dev/null || true' \
             'if [ -d "usr/src/linux-headers-${KVER_SUB}" ]; then' \
@@ -232,7 +242,6 @@ jobs:
             'depmod "${KVER_SUB}" 2>/dev/null || true' \
             'echo "已安装 ${KVER_SUB}"' \
             > "$PKG_ROOT/install-${KVER}.sh"
-          sed -i "s|__KVER__|${KVER}|g" "$PKG_ROOT/install-${KVER}.sh"
           chmod 755 "$PKG_ROOT/install-${KVER}.sh"
 
           cd "$(dirname "$PKG_ROOT")" && tar --owner=0 --group=0 --numeric-owner -cJf "$OLDPWD/${OUT}/linux-${KVER}-${ARCH}.tar.xz" "$(basename "$PKG_ROOT")"
@@ -251,7 +260,7 @@ jobs:
           cp "${{ steps.locate.outputs.VMLINUZ }}" "$IMG_ROOT/boot/vmlinuz-${KVER}"
           cp "${{ steps.locate.outputs.SYSTEM_MAP }}" "$IMG_ROOT/boot/"
           cp "${{ steps.locate.outputs.CONFIG }}" "$IMG_ROOT/boot/"
-          cp -a "${{ steps.locate.outputs.MODULES_DIR }}/${KVER}" "$IMG_ROOT/lib/modules/"
+          cp -a "${{ steps.locate.outputs.MODULES_DIR }}/${{ steps.locate.outputs.MODULES_KVER }}" "$IMG_ROOT/lib/modules/"
 
           printf '%s\n' \
             "pkgname = linux-image-${KVER}" \
@@ -266,7 +275,7 @@ jobs:
           if [ "${{ inputs.include_headers }}" = "true" ] && [ -n "${{ steps.locate.outputs.HDR }}" ]; then
             HDR_ROOT="$(mktemp -d)"
             mkdir -p "$HDR_ROOT/usr/src/linux-headers-${KVER}"
-            cp -a "${{ steps.locate.outputs.HDR }}/usr/src/linux-headers-${KVER}/." "$HDR_ROOT/usr/src/linux-headers-${KVER}/"
+            cp -a "${{ steps.locate.outputs.HDR }}/." "$HDR_ROOT/usr/src/linux-headers-${KVER}/"
 
             printf '%s\n' \
               "pkgname = linux-headers-${KVER}" \
