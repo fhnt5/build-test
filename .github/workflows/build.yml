@@ -290,6 +290,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
+          # 只下载最终成品（kernel-<arch>-<format>），
+          # 排除编译中间产物（build-<arch>），避免重复与体积浪费
           pattern: kernel-*
           merge-multiple: true
           path: release
@@ -297,10 +299,11 @@ jobs:
         run: |
           set -euo pipefail
           cd release
-          find . -type f | head -50
-          gh release create "${{ inputs.release_tag }}" ./*.{deb,rpm,tar.xz,pkg.tar.zst} \
+          ls -lh
+          gh release create "${{ inputs.release_tag }}" \
+            $(find . -type f \( -name '*.deb' -o -name '*.rpm' -o -name '*.tar.xz' -o -name '*.pkg.tar.zst' \)) \
             --title "Kernel ${{ inputs.kernel_ref }}" \
-            --notes "内核 ${{ inputs.kernel_ref }} 构建产物" \
+            --notes "内核 ${{ inputs.kernel_ref }} 构建产物（${{ inputs.arch }} / ${{ inputs.formats }}）" \
             --draft=false
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
