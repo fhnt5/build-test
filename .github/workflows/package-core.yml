@@ -18,9 +18,6 @@ on:
       format:
         type: string
         required: true
-      kver:
-        type: string
-        required: true
 
 jobs:
   package:
@@ -39,28 +36,29 @@ jobs:
         run: |
           set -euo pipefail
           SRC="$(pwd)/build-artifacts"
-          KVER="${{ inputs.kver }}"
 
-          # 编译 job 上传的目录是 dist/compile/${KVER}，但 download-artifact 会把它压平到 build-artifacts/
-          # 实际结构可能是 build-artifacts/${KVER}/... 或 build-artifacts/boot/...
-          # 这里做一个兼容查找
-          if [ -d "$SRC/boot" ]; then
-            ROOT="$SRC"
-            MODULES_DIR="$SRC/lib/modules"
-          elif [ -d "$SRC/$KVER/boot" ]; then
-            ROOT="$SRC/$KVER"
-            MODULES_DIR="$SRC/$KVER/lib/modules"
-          elif [ -d "$SRC/dist/compile/$KVER/boot" ]; then
-            ROOT="$SRC/dist/compile/$KVER"
-            MODULES_DIR="$SRC/dist/compile/$KVER/lib/modules"
-          else
-            echo "ERROR: 找不到编译产物 boot 目录" >&2
-            find "$SRC" -maxdepth 3 -type d | head -50 >&2
-            exit 1
-          fi
+          # 找到 vmlinuz 并反推 KVER
+          VMLINUZ="$(find "$SRC" -maxdepth 4 -name 'vmlinuz-*' -print -quit)"
+          [ -n "$VMLINUZ" ] || { echo "ERROR: 找不到 vmlinuz" >&2; find "$SRC" -maxdepth 4 -type f | head -50 >&2; exit 1; }
 
+          KVER="$(basename "$VMLINUZ" | sed 's/^vmlinuz-//')"
+          echo "KVER=$KVER" >> "$GITHUB_OUTPUT"
+
+          BOOT_DIR="$(dirname "$VMLINUZ")"
+          ROOT="$(dirname "$BOOT_DIR")"
           echo "ROOT=$ROOT" >> "$GITHUB_OUTPUT"
+
+          MODULES_DIR="$ROOT/lib/modules"
+          [ -d "$MODULES_DIR" ] || { echo "ERROR: 找不到 lib/modules" >&2; exit 1; }
           echo "MODULES_DIR=$MODULES_DIR" >> "$GITHUB_OUTPUT"
+
+          # System.map 和 config 用 find 容错匹配
+          SYSTEM_MAP="$(find "$BOOT_DIR" -maxdepth 1 -name 'System.map-*' -print -quit)"
+          CONFIG_FILE="$(find "$BOOT_DIR" -maxdepth 1 -name 'config-*' -print -quit)"
+          [ -n "$SYSTEM_MAP" ] || { echo "ERROR: 找不到 System.map" >&2; exit 1; }
+          [ -n "$CONFIG_FILE" ] || { echo "ERROR: 找不到 config" >&2; exit 1; }
+          echo "SYSTEM_MAP=$SYSTEM_MAP" >> "$GITHUB_OUTPUT"
+          echo "CONFIG_FILE=$CONFIG_FILE" >> "$GITHUB_OUTPUT"
 
       - name: 安装打包工具
         run: |
@@ -71,19 +69,17 @@ jobs:
       - name: 打包 ${{ inputs.format }}
         run: |
           set -euo pipefail
-          KVER="${{ inputs.kver }}"
+          KVER="${{ steps.locate.outputs.KVER }}"
           DEB_ARCH="${{ inputs.deb_arch }}"
           RPM_ARCH="${{ inputs.rpm_arch }}"
           ARCH="${{ inputs.arch_name }}"
           SRC="${{ steps.locate.outputs.ROOT }}"
           MODULES_DIR="${{ steps.locate.outputs.MODULES_DIR }}"
+          VMLINUZ="$(find "$SRC/boot" -maxdepth 1 -name 'vmlinuz-*' -print -quit)"
+          SYSTEM_MAP="${{ steps.locate.outputs.SYSTEM_MAP }}"
+          CONFIG_FILE="${{ steps.locate.outputs.CONFIG_FILE }}"
           OUT="$(pwd)/dist/${{ inputs.arch }}/${{ inputs.format }}"
           mkdir -p "$OUT"
-
-          # 用 find 容错匹配 vmlinuz / System.map / config
-          VMLINUZ="$(find "$SRC/boot" -maxdepth 1 -name 'vmlinuz-*' -print -quit)"
-          SYSTEM_MAP="$(find "$SRC/boot" -maxdepth 1 -name 'System.map-*' -print -quit)"
-          CONFIG_FILE="$(find "$SRC/boot" -maxdepth 1 -name 'config-*' -print -quit)"
 
           [ -n "$VMLINUZ" ] || { echo "ERROR: vmlinuz 缺失" >&2; exit 1; }
           [ -n "$SYSTEM_MAP" ] || { echo "ERROR: System.map 缺失" >&2; exit 1; }
@@ -91,7 +87,11 @@ jobs:
 
           # 反查 modules 目录名，允许与 KVER 不同（如 7.2.8-gxxxx）
           MODULES_KVER="$(basename "$(find "$MODULES_DIR" -maxdepth 1 -type d -name '7.2.8*' -print -quit)")"
+          if [ -z "$MODULES_KVER" ] || [ ! -d "$MODULES_DIR/$MODULES_KVER" ]; then
+            MODULES_KVER="$(basename "$(find "$MODULES_DIR" -mindepth 1 -maxdepth 1 -type d -print -quit)")"
+          fi
           [ -n "$MODULES_KVER" ] && [ -d "$MODULES_DIR/$MODULES_KVER" ] || { echo "ERROR: modules 目录缺失" >&2; exit 1; }
+          echo "MODULES_KVER=$MODULES_KVER" >&2
 
           case "${{ inputs.format }}" in
             deb)
@@ -134,7 +134,6 @@ jobs:
               ;;
 
             rpm)
-              # 拆 KVER: 7.2.8-gxxxx → Version 7.2.8, Release gxxxx
               RPM_VER="$(echo "$KVER" | rev | cut -d'-' -f2- | rev)"
               RPM_REL="$(echo "$KVER" | rev | cut -d'-' -f1 | rev)"
               [ -z "$RPM_VER" ] && RPM_VER="$KVER"
@@ -177,7 +176,8 @@ jobs:
                 "/lib/modules/${KVER}" \
                 >> "$SPEC"
 
-              rpmbuild --define "_topdir $RPM_TOPDIR" -bb "$SPEC"
+              rpmbuild --define "_topdir $RPM_TOPDIR" -bb "$SPEC" \
+                || { echo "ERROR: rpmbuild kernel-image 失败" >&2; exit 1; }
 
               if [ -d "$SRC/headers" ]; then
                 HSPEC="$RPM_TOPDIR/SPECS/kernel-headers.spec"
@@ -202,16 +202,19 @@ jobs:
                   '' \
                   '%install' \
                   'rm -rf %{buildroot}' \
-                  'mkdir -p %{buildroot}/usr/src/linux-headers-'${KVER} \
+                  "mkdir -p %{buildroot}/usr/src/linux-headers-${KVER}" \
                   "cp -a ${SRC}/headers/. %{buildroot}/usr/src/linux-headers-${KVER}/" \
                   '' \
                   '%files' \
                   "/usr/src/linux-headers-${KVER}" \
                   >> "$HSPEC"
-                rpmbuild --define "_topdir $RPM_TOPDIR" -bb "$HSPEC"
+                rpmbuild --define "_topdir $RPM_TOPDIR" -bb "$HSPEC" \
+                  || { echo "ERROR: rpmbuild kernel-headers 失败" >&2; exit 1; }
               fi
 
               find "$RPM_TOPDIR/RPMS" -name '*.rpm' -exec cp {} "$OUT/" \;
+              [ -n "$(find "$OUT" -name '*.rpm' -print -quit)" ] \
+                || { echo "ERROR: 未生成 rpm" >&2; exit 1; }
               ;;
 
             tarxz)
