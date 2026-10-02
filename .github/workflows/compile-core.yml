@@ -1,0 +1,350 @@
+name: Compile Kernel
+
+on:
+  workflow_call:
+    inputs:
+      runner:
+        type: string
+        required: true
+      arch:
+        type: string
+        required: true
+      deb_arch:
+        type: string
+        required: true
+      rpm_arch:
+        type: string
+        required: true
+      arch_boot:
+        type: string
+        required: true
+      config_choice:
+        type: string
+        default: 'default'
+      config_custom:
+        type: string
+        default: ''
+      respect_config:
+        type: boolean
+        default: true
+      include_headers:
+        type: boolean
+        default: true
+      headers_full_tree:
+        type: boolean
+        default: true
+      strip_modules:
+        type: boolean
+        default: false
+      parallel_jobs:
+        type: string
+        default: 'auto'
+      ccache:
+        type: boolean
+        default: false
+      lto_mode:
+        type: string
+        default: 'none'
+      tune_profile:
+        type: string
+        default: 'none'
+      kernel_repo:
+        type: string
+        default: 'https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux-stable.git'
+      kernel_ref:
+        type: string
+        required: true
+
+jobs:
+  compile:
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 清理磁盘空间
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost
+          df -h /
+
+      - name: 安装构建依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libncurses-dev bison flex \
+            libssl-dev libelf-dev libdw-dev elfutils bc dwarves zstd cpio \
+            rsync kmod xz-utils dpkg-dev rpm git jq curl ccache \
+            clang lld llvm
+
+      - name: 克隆内核源码
+        run: |
+          set -euo pipefail
+          REF="${{ inputs.kernel_ref }}"
+          REPO="${{ inputs.kernel_repo }}"
+          if ! git clone --depth 1 --branch "$REF" "$REPO" kernel-source 2>/dev/null; then
+            rm -rf kernel-source
+            git clone --branch "$REF" "$REPO" kernel-source
+          fi
+
+      - name: 解析并应用配置
+        id: config
+        run: |
+          set -euo pipefail
+          CHOICE="${{ inputs.config_choice }}"
+          CUSTOM="${{ inputs.config_custom }}"
+          KARCH="${{ inputs.arch }}"
+
+          if [ -n "$CUSTOM" ]; then
+            CHOICE="$CUSTOM"
+          fi
+
+          CONFIG_OUT="/tmp/kernel.config"
+
+          if echo "$CHOICE" | grep -qE '^https?://'; then
+            curl -fSL "$CHOICE" -o "$CONFIG_OUT"
+          elif echo "$CHOICE" | grep -qE '^make:'; then
+            TARGET="${CHOICE#make:}"
+            cd kernel-source
+            make ARCH="$KARCH" "$TARGET"
+            cp .config "$CONFIG_OUT"
+            cd ..
+          elif [ -f "$CHOICE" ]; then
+            cp "$CHOICE" "$CONFIG_OUT"
+          elif [ -f "configs/$CHOICE" ]; then
+            cp "configs/$CHOICE" "$CONFIG_OUT"
+          elif echo "$CHOICE" | grep -qE '^(default|allyesconfig|allmodconfig|allnoconfig|tinyconfig)$'; then
+            cd kernel-source
+            make ARCH="$KARCH" "$CHOICE"
+            cp .config "$CONFIG_OUT"
+            cd ..
+          else
+            case "$CHOICE" in
+              alma)     URL='https://git.almalinux.org/rpms/kernel/-/raw/c9/f/kernel-x86_64-fedora.config' ;;
+              alpine)   URL='https://gitlab.alpinelinux.org/alpine/aports/-/raw/master/main/linux-lts/config-lts.x86_64' ;;
+              arch)     URL='https://gitlab.archlinux.org/archlinux/packaging/packages/linux/-/raw/main/config' ;;
+              centos)   URL='https://gitlab.com/redhat/centos-stream/rpms/kernel/-/raw/c9s/f/kernel-x86_64-fedora.config' ;;
+              debian)   URL='https://salsa.debian.org/kernel-team/linux/-/raw/debian/latest/debian/config/config' ;;
+              fedora)   URL='https://src.fedoraproject.org/rpms/kernel/raw/rawhide/f/kernel-x86_64-fedora.config' ;;
+              gentoo)   URL='https://gitweb.gentoo.org/proj/gentoo-kernel.git/plain/default_config' ;;
+              kali)     URL='https://gitlab.com/kalilinux/packages/linux/-/raw/kali/master/debian/config/config' ;;
+              manjaro)  URL='https://gitlab.manjaro.org/packages/core/linux/-/raw/master/config' ;;
+              nixos)    URL='https://raw.githubusercontent.com/NixOS/nixpkgs/master/pkgs/os-specific/linux/kernel/common-config.nix' ;;
+              opensuse) URL='https://raw.githubusercontent.com/openSUSE/kernel-source/master/config/x86_64/default' ;;
+              rhel)     URL='https://gitlab.com/redhat/centos-stream/rpms/kernel/-/raw/c9s/f/kernel-x86_64-fedora.config' ;;
+              rocky)    URL='https://git.rockylinux.org/rocky/kernel/-/raw/r9/f/kernel-x86_64-fedora.config' ;;
+              ubuntu)   URL='https://git.launchpad.net/~ubuntu-kernel/ubuntu/+source/linux/+git/jammy/plain/debian.master/config/amd64/config.flavour.generic' ;;
+              void)     URL='https://raw.githubusercontent.com/void-linux/void-packages/master/srcpkgs/linux/files/x86_64-dotconfig' ;;
+              *) echo "ERROR: 未知配置预设: $CHOICE" >&2; exit 1 ;;
+            esac
+            if [ "$KARCH" = "arm64" ]; then
+              case "$CHOICE" in
+                alma|centos|fedora|rhel|rocky)
+                  URL='https://git.almalinux.org/rpms/kernel/-/raw/c9/f/kernel-aarch64-fedora.config' ;;
+                alpine)
+                  URL='https://gitlab.alpinelinux.org/alpine/aports/-/raw/master/main/linux-lts/config-lts.aarch64' ;;
+                opensuse)
+                  URL='https://raw.githubusercontent.com/openSUSE/kernel-source/master/config/arm64/default' ;;
+                ubuntu)
+                  URL='https://git.launchpad.net/~ubuntu-kernel/ubuntu/+source/linux/+git/jammy/plain/debian.master/config/arm64/config.flavour.generic' ;;
+                void)
+                  URL='https://raw.githubusercontent.com/void-linux/void-packages/master/srcpkgs/linux/files/aarch64-dotconfig' ;;
+              esac
+            fi
+            curl -fSL "$URL" -o "$CONFIG_OUT"
+          fi
+
+          cd kernel-source
+          cp "$CONFIG_OUT" .config
+
+          if [ "${{ inputs.respect_config }}" != "true" ]; then
+            sed -i '/^CONFIG_LD_ORPHAN_WARN_LEVEL=/d' .config
+            echo 'CONFIG_LD_ORPHAN_WARN_LEVEL="warn"' >> .config
+            make ARCH="$KARCH" olddefconfig </dev/null
+          else
+            grep -q '^CONFIG_LD_ORPHAN_WARN_LEVEL=' .config || echo 'CONFIG_LD_ORPHAN_WARN_LEVEL="warn"' >> .config
+            grep -q '^CONFIG_LOCALVERSION_AUTO=' .config || echo 'CONFIG_LOCALVERSION_AUTO=y' >> .config
+          fi
+
+      - name: 应用调优预设
+        if: ${{ inputs.respect_config != true }}
+        run: |
+          set -euo pipefail
+          cd kernel-source
+          KARCH="${{ inputs.arch }}"
+
+          case "${{ inputs.tune_profile }}" in
+            performance)
+              for c in NO_HZ_FULL RCU_NOCBS PREEMPT_DYNAMIC CPU_FREQ_DEFAULT_GOV_PERFORMANCE; do
+                sed -i "/^CONFIG_${c}=/d" .config
+                echo "CONFIG_${c}=y" >> .config
+              done
+              for c in MITIGATION_RETPOLINE MITIGATION_SPECTRE_BHI MITIGATION_IBPB_ENTRY MITIGATION_IBRS_ENTRY MITIGATION_L1TF MITIGATION_PTI; do
+                sed -i "/^CONFIG_${c}=/d" .config
+                echo "# CONFIG_${c} is not set" >> .config
+              done
+              sed -i '/^CONFIG_CPU_FREQ_DEFAULT_GOV_ONDEMAND=/d' .config
+              echo "# CONFIG_CPU_FREQ_DEFAULT_GOV_ONDEMAND is not set" >> .config
+              ;;
+            lowlatency)
+              sed -i '/^CONFIG_PREEMPT_VOLUNTARY=/d' .config
+              sed -i '/^CONFIG_PREEMPT_NONE=/d' .config
+              echo "CONFIG_PREEMPT=y" >> .config
+              sed -i '/^CONFIG_HZ_250=/d' .config
+              sed -i '/^CONFIG_HZ_300=/d' .config
+              sed -i '/^CONFIG_HZ_100=/d' .config
+              echo "CONFIG_HZ_1000=y" >> .config
+              sed -i '/^CONFIG_RCU_BOOST=/d' .config
+              echo "CONFIG_RCU_BOOST=y" >> .config
+              ;;
+            minimal)
+              sed -i '/^CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE=/d' .config
+              echo "CONFIG_CC_OPTIMIZE_FOR_SIZE=y" >> .config
+              for c in MODULE_SIG MODULE_SIG_ALL MODULE_SIG_FORCE; do
+                sed -i "/^CONFIG_${c}=/d" .config
+                echo "# CONFIG_${c} is not set" >> .config
+              done
+              ;;
+            debugoff)
+              for c in KASAN KMSAN KCSAN KFENCE KMEMLEAK DEBUG_INFO DWARF_TOOLCHAIN_DEFAULT FTRACE FUNCTION_TRACER FUNCTION_GRAPH_TRACER STACK_TRACER KPROBES UPROBES TRACEPOINTS DEBUG_FS SLUB_DEBUG DEBUG_PAGEALLOC DEBUG_KMEMLEAK DEBUG_STACK_USAGE SCHEDSTATS LATENCYTOP LOCK_STAT; do
+                sed -i "/^CONFIG_${c}=/d" .config
+                echo "# CONFIG_${c} is not set" >> .config
+              done
+              ;;
+            default)
+              for c in DEBUG_BUGVERBOSE DEBUG_LIST DEBUG_SG DEBUG_NOTIFIERS DEBUG_CREDENTIALS RCU_TRACE SCHED_DEBUG PRINTK_TIME DYNAMIC_DEBUG DEBUG_ATOMIC_SLEEP DEBUG_PREEMPT DEBUG_SPINLOCK DEBUG_MUTEXES DEBUG_RT_MUTEXES DEBUG_WW_MUTEX_SLOWPATH DEBUG_LOCK_ALLOC DEBUG_LOCKDEP DEBUG_KOBJECT DEBUG_KOBJECT_RELEASE; do
+                sed -i "/^CONFIG_${c}=/d" .config
+                echo "# CONFIG_${c} is not set" >> .config
+              done
+              ;;
+            none)
+              ;;
+          esac
+
+      - name: 应用 LTO
+        if: ${{ inputs.respect_config != true }}
+        run: |
+          set -euo pipefail
+          cd kernel-source
+          LTO="${{ inputs.lto_mode }}"
+          if [ "$LTO" = "none" ]; then
+            sed -i '/^CONFIG_LTO=/d' .config
+            sed -i '/^CONFIG_LTO_CLANG_FULL=/d' .config
+            sed -i '/^CONFIG_LTO_CLANG_THIN=/d' .config
+            echo "CONFIG_LTO_NONE=y" >> .config
+          else
+            sed -i '/^CONFIG_LTO=/d' .config
+            echo "CONFIG_LTO=y" >> .config
+            sed -i '/^CONFIG_LTO_NONE=/d' .config
+            echo "# CONFIG_LTO_NONE is not set" >> .config
+            if [ "$LTO" = "full" ]; then
+              sed -i '/^CONFIG_LTO_CLANG_FULL=/d' .config
+              echo "CONFIG_LTO_CLANG_FULL=y" >> .config
+              sed -i '/^CONFIG_LTO_CLANG_THIN=/d' .config
+              echo "# CONFIG_LTO_CLANG_THIN is not set" >> .config
+            else
+              sed -i '/^CONFIG_LTO_CLANG_THIN=/d' .config
+              echo "CONFIG_LTO_CLANG_THIN=y" >> .config
+              sed -i '/^CONFIG_LTO_CLANG_FULL=/d' .config
+              echo "# CONFIG_LTO_CLANG_FULL is not set" >> .config
+            fi
+          fi
+
+      - name: 收敛配置
+        if: ${{ inputs.respect_config != true }}
+        run: |
+          set -euo pipefail
+          cd kernel-source
+          make ARCH="${{ inputs.arch }}" olddefconfig </dev/null
+
+      - name: 编译内核
+        id: compile
+        run: |
+          set -euo pipefail
+          cd kernel-source
+          KARCH="${{ inputs.arch }}"
+
+          JOBS="${{ inputs.parallel_jobs }}"
+          if [ "$JOBS" = "auto" ]; then
+            JOBS="$(nproc)"
+          fi
+
+          MAKE_ARGS="ARCH=$KARCH -j$JOBS"
+
+          if [ "${{ inputs.ccache }}" = "true" ]; then
+            export PATH="/usr/lib/ccache:$PATH"
+            export CC="ccache gcc"
+            export HOSTCC="ccache gcc"
+          fi
+
+          if [ "${{ inputs.lto_mode }}" != "none" ]; then
+            MAKE_ARGS="$MAKE_ARGS LLVM=1"
+          fi
+
+          make $MAKE_ARGS
+
+          KVER="$(make ARCH="$KARCH" -s kernelrelease)"
+          echo "KVER=$KVER" >> "$GITHUB_OUTPUT"
+          echo "内核版本: $KVER"
+
+      - name: 暂存内核产物
+        id: stage
+        run: |
+          set -euo pipefail
+          cd kernel-source
+          KARCH="${{ inputs.arch }}"
+          KVER="${{ steps.compile.outputs.KVER }}"
+          KIMAGE="${{ inputs.arch_boot }}"
+
+          STAGE_DIR="$(mktemp -d)"
+          echo "STAGE=$STAGE_DIR" >> "$GITHUB_OUTPUT"
+
+          mkdir -p "$STAGE_DIR/boot"
+          cp "$KIMAGE" "$STAGE_DIR/boot/vmlinuz-${KVER}"
+          cp System.map "$STAGE_DIR/boot/System.map-${KVER}"
+          cp .config "$STAGE_DIR/boot/config-${KVER}"
+
+          if [ "${{ inputs.strip_modules }}" = "true" ]; then
+            make ARCH="$KARCH" modules_install INSTALL_MOD_PATH="$STAGE_DIR" INSTALL_MOD_STRIP=1
+          else
+            make ARCH="$KARCH" modules_install INSTALL_MOD_PATH="$STAGE_DIR"
+          fi
+          rm -f "$STAGE_DIR/lib/modules/${KVER}/build" "$STAGE_DIR/lib/modules/${KVER}/source"
+
+      - name: 暂存 headers
+        id: headers
+        if: ${{ inputs.include_headers == true }}
+        run: |
+          set -euo pipefail
+          cd kernel-source
+          KARCH="${{ inputs.arch }}"
+          KVER="${{ steps.compile.outputs.KVER }}"
+
+          HDR_DIR="$(mktemp -d)/linux-headers-${KVER}"
+          mkdir -p "$HDR_DIR/usr/src/linux-headers-${KVER}"
+
+          if [ "${{ inputs.headers_full_tree }}" = "true" ]; then
+            cp -a include scripts arch "$HDR_DIR/usr/src/linux-headers-${KVER}/"
+          else
+            cp -a include "$HDR_DIR/usr/src/linux-headers-${KVER}/"
+            mkdir -p "$HDR_DIR/usr/src/linux-headers-${KVER}/scripts"
+            for d in basic mod package recordmk kernel; do
+              if [ -d "scripts/$d" ]; then
+                cp -a "scripts/$d" "$HDR_DIR/usr/src/linux-headers-${KVER}/scripts/"
+              fi
+            done
+            mkdir -p "$HDR_DIR/usr/src/linux-headers-${KVER}/arch"
+            cp -a "arch/$KARCH" "$HDR_DIR/usr/src/linux-headers-${KVER}/arch/"
+          fi
+          cp Makefile .config Module.symvers Kbuild "$HDR_DIR/usr/src/linux-headers-${KVER}/" 2>/dev/null || true
+
+          echo "HDR=$HDR_DIR" >> "$GITHUB_OUTPUT"
+
+      - name: 上传编译产物
+        if: ${{ always() && !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-${{ inputs.arch }}
+          path: |
+            ${{ steps.stage.outputs.STAGE }}/**/*
+            ${{ steps.headers.outputs.HDR }}/**/*
+          retention-days: 1
+          if-no-files-found: error
