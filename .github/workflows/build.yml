@@ -3,323 +3,274 @@ name: Build Kernel
 on:
   workflow_dispatch:
     inputs:
-      x86_64_deb:
-        description: '构建 x86_64 deb'
-        type: boolean
-        default: true
-      x86_64_rpm:
-        description: '构建 x86_64 rpm'
-        type: boolean
-        default: false
-      x86_64_tarxz:
-        description: '构建 x86_64 tar.xz'
-        type: boolean
-        default: false
-      x86_64_pkg:
-        description: '构建 x86_64 pkg.tar.zst'
-        type: boolean
-        default: false
-      arm64_deb:
-        description: '构建 arm64 deb'
-        type: boolean
-        default: false
-      arm64_rpm:
-        description: '构建 arm64 rpm'
-        type: boolean
-        default: false
-      arm64_tarxz:
-        description: '构建 arm64 tar.xz'
-        type: boolean
-        default: false
-      arm64_pkg:
-        description: '构建 arm64 pkg.tar.zst'
-        type: boolean
-        default: false
-      config_choice:
-        description: '内核配置预设'
-        type: choice
-        default: 'default'
-        options:
-          - 'default'
-          - 'allyesconfig'
-          - 'allmodconfig'
-          - 'allnoconfig'
-          - 'tinyconfig'
-          - 'configs/G40_45.config'
-          - 'alma'
-          - 'alpine'
-          - 'arch'
-          - 'centos'
-          - 'debian'
-          - 'fedora'
-          - 'gentoo'
-          - 'kali'
-          - 'manjaro'
-          - 'nixos'
-          - 'opensuse'
-          - 'rhel'
-          - 'rocky'
-          - 'ubuntu'
-          - 'void'
-      config_custom:
-        description: '自定义配置路径或 URL（优先于上方选项）'
-        type: string
-        default: ''
-      respect_config:
-        description: '严格模式：原样使用 .config，不执行调优与 LTO 修改'
-        type: boolean
-        default: true
-      include_headers:
-        description: '同时构建 headers 包'
-        type: boolean
-        default: true
-      headers_full_tree:
-        description: 'headers 完整源码树（关闭=仅最小子集）'
-        type: boolean
-        default: true
-      strip_modules:
-        description: '剥离内核模块调试符号'
-        type: boolean
-        default: false
-      tarxz_include_headers:
-        description: 'tar.xz 包内包含 headers 目录'
-        type: boolean
-        default: true
-      parallel_jobs:
-        description: '并行编译线程数'
-        type: choice
-        default: 'auto'
-        options: ['auto', '1', '2', '4', '8', '16']
-      ccache:
-        description: '启用 ccache 编译器缓存'
-        type: boolean
-        default: false
-      lto_mode:
-        description: 'LLVM 链接时优化'
-        type: choice
-        default: 'none'
-        options: ['none', 'full', 'thin']
-      tune_profile:
-        description: '调优预设（none=不修改 .config）'
-        type: choice
-        default: 'none'
-        options: ['none', 'default', 'performance', 'lowlatency', 'minimal', 'debugoff']
       kernel_repo:
-        description: '内核源码仓库 URL'
+        description: '内核源码仓库'
         type: string
         default: 'https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux-stable.git'
       kernel_ref:
-        description: 'git 分支或标签（留空=自动取最新 stable）'
+        description: '内核版本/分支/tag/commit'
+        type: string
+        required: true
+      arch:
+        description: '目标架构'
+        type: choice
+        options: ['x86_64', 'arm64', 'both']
+        default: 'x86_64'
+      formats:
+        description: '打包格式（逗号分隔）'
+        type: string
+        default: 'deb,rpm,tarxz,pkg'
+      config_choice:
+        description: '配置预设'
+        type: choice
+        options:
+          - 'default'
+          - 'debian'
+          - 'ubuntu'
+          - 'fedora'
+          - 'centos'
+          - 'rhel'
+          - 'rocky'
+          - 'alma'
+          - 'alpine'
+          - 'arch'
+          - 'manjaro'
+          - 'gentoo'
+          - 'opensuse'
+          - 'kali'
+          - 'nixos'
+          - 'void'
+        default: 'default'
+      config_custom:
+        description: '自定义配置（URL / make:target / 文件路径，留空则用上方预设）'
         type: string
         default: ''
+      respect_config:
+        description: '尊重原配置（不改调优/LTO）'
+        type: boolean
+        default: true
+      tune_profile:
+        description: '调优预设（仅 respect_config=false 时生效）'
+        type: choice
+        options: ['none', 'performance', 'lowlatency', 'minimal', 'debugoff', 'default']
+        default: 'none'
+      lto_mode:
+        description: 'LTO 模式（仅 respect_config=false 时生效）'
+        type: choice
+        options: ['none', 'thin', 'full']
+        default: 'none'
+      include_headers:
+        description: '打包 headers'
+        type: boolean
+        default: true
+      headers_full_tree:
+        description: 'headers 完整树（false 则仅 include+scripts+arch）'
+        type: boolean
+        default: true
+      strip_modules:
+        description: 'strip 内核模块'
+        type: boolean
+        default: false
+      tarxz_include_headers:
+        description: 'tar.xz 内包含 headers'
+        type: boolean
+        default: true
+      ccache:
+        description: '启用 ccache'
+        type: boolean
+        default: true
+      parallel_jobs:
+        description: '并行 jobs（auto / 数字）'
+        type: string
+        default: 'auto'
       release_tag:
-        description: '发布标签（留空=仅保留 artifact，不创建 Release）'
+        description: '发布 tag（留空则不创建 release）'
         type: string
         default: ''
-
-permissions:
-  contents: write
 
 jobs:
-  resolve-ref:
+  prepare:
     runs-on: ubuntu-latest
     outputs:
-      kernel_ref: ${{ steps.resolve.outputs.kernel_ref }}
+      matrix: ${{ steps.m.outputs.matrix }}
+      has_x86_64: ${{ steps.m.outputs.has_x86_64 }}
+      has_arm64: ${{ steps.m.outputs.has_arm64 }}
+      x86_64_formats: ${{ steps.m.outputs.x86_64_formats }}
+      arm64_formats: ${{ steps.m.outputs.arm64_formats }}
     steps:
-      - name: 解析内核版本引用
-        id: resolve
+      - id: m
         run: |
           set -euo pipefail
-          INPUT_REF="${{ inputs.kernel_ref }}"
-          REPO="${{ inputs.kernel_repo }}"
+          ARCH='${{ inputs.arch }}'
+          FMT='${{ inputs.formats }}'
 
-          if [ -n "$INPUT_REF" ]; then
-            echo "kernel_ref=$INPUT_REF" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
+          case "$ARCH" in
+            x86_64) BUILD_X86=1; BUILD_ARM=0 ;;
+            arm64)  BUILD_X86=0; BUILD_ARM=1 ;;
+            both)   BUILD_X86=1; BUILD_ARM=1 ;;
+            *) echo "不支持的架构: $ARCH" >&2; exit 1 ;;
+          esac
 
-          if echo "$REPO" | grep -Eq '(^|/)linux-stable(\.git)?$'; then
-            STABLE_TAG="$(git ls-remote --tags --refs "$REPO" 2>/dev/null \
-              | awk -F/ '{print $NF}' \
-              | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
-              | sort -Vr \
-              | head -1 || true)"
-            if [ -n "$STABLE_TAG" ]; then
-              echo "kernel_ref=$STABLE_TAG" >> "$GITHUB_OUTPUT"
-              exit 0
-            fi
-          fi
+          echo "has_x86_64=$BUILD_X86" >> "$GITHUB_OUTPUT"
+          echo "has_arm64=$BUILD_ARM"  >> "$GITHUB_OUTPUT"
+          echo "x86_64_formats=$(printf '%s' "$FMT" | jq -R -s -c 'split(",")')" >> "$GITHUB_OUTPUT"
+          echo "arm64_formats=$(printf '%s'  "$FMT" | jq -R -s -c 'split(",")')" >> "$GITHUB_OUTPUT"
 
-          PATTERN='^v?[0-9]+\.[0-9]+(\.[0-9]+)?(-[0-9A-Za-z._-]+)?$'
-          LATEST="$(git ls-remote --tags --refs --sort=-v:refname "$REPO" 2>/dev/null \
-            | awk -F/ '{print $NF}' | grep -E "$PATTERN" | head -1 || true)"
-          if [ -n "$LATEST" ]; then
-            echo "kernel_ref=$LATEST" >> "$GITHUB_OUTPUT"
-            exit 0
+          if [ "$BUILD_X86" = "1" ] && [ "$BUILD_ARM" = "1" ]; then
+            MATRIX="$(jq -n -c --argjson f "$(printf '%s' "$FMT" | jq -R -s 'split(",")')" \
+              '[{arch:"x86_64",deb_arch:"amd64",rpm_arch:"x86_64",arch_boot:"arch/x86/boot/bzImage",runner:"ubuntu-latest",formats:$f},{arch:"arm64",deb_arch:"arm64",rpm_arch:"aarch64",arch_boot:"arch/arm64/boot/Image",runner:"ubuntu-24.04-arm",formats:$f}]')"
+          elif [ "$BUILD_X86" = "1" ]; then
+            MATRIX="$(jq -n -c --argjson f "$(printf '%s' "$FMT" | jq -R -s 'split(",")')" \
+              '[{arch:"x86_64",deb_arch:"amd64",rpm_arch:"x86_64",arch_boot:"arch/x86/boot/bzImage",runner:"ubuntu-latest",formats:$f}]')"
+          else
+            MATRIX="$(jq -n -c --argjson f "$(printf '%s' "$FMT" | jq -R -s 'split(",")')" \
+              '[{arch:"arm64",deb_arch:"arm64",rpm_arch:"aarch64",arch_boot:"arch/arm64/boot/Image",runner:"ubuntu-24.04-arm",formats:$f}]')"
           fi
-
-          DEFAULT_BRANCH="$(git ls-remote --symref "$REPO" HEAD 2>/dev/null \
-            | awk '/^ref:/ {sub("refs/heads/","",$2); print $2; exit}' || true)"
-          if [ -n "$DEFAULT_BRANCH" ]; then
-            echo "kernel_ref=$DEFAULT_BRANCH" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          SHA="$(git ls-remote "$REPO" HEAD 2>/dev/null | awk '{print $1; exit}' || true)"
-          if [ -z "$SHA" ]; then
-            echo "ERROR: 无法解析仓库 $REPO 的版本引用" >&2
-            exit 1
-          fi
-          echo "kernel_ref=$SHA" >> "$GITHUB_OUTPUT"
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
 
   compile-x86_64:
-    needs: resolve-ref
-    if: ${{ inputs.x86_64_deb == true || inputs.x86_64_rpm == true || inputs.x86_64_tarxz == true || inputs.x86_64_pkg == true }}
+    needs: prepare
+    if: ${{ needs.prepare.outputs.has_x86_64 == 'true' }}
     uses: ./.github/workflows/compile-core.yml
     with:
-      runner: ubuntu-latest
       arch: x86_64
+      arch_name: x86_64
       deb_arch: amd64
       rpm_arch: x86_64
       arch_boot: arch/x86/boot/bzImage
+      runner: ubuntu-latest
+      kernel_repo: ${{ inputs.kernel_repo }}
+      kernel_ref: ${{ inputs.kernel_ref }}
       config_choice: ${{ inputs.config_choice }}
       config_custom: ${{ inputs.config_custom }}
       respect_config: ${{ inputs.respect_config }}
+      tune_profile: ${{ inputs.tune_profile }}
+      lto_mode: ${{ inputs.lto_mode }}
       include_headers: ${{ inputs.include_headers }}
       headers_full_tree: ${{ inputs.headers_full_tree }}
       strip_modules: ${{ inputs.strip_modules }}
       parallel_jobs: ${{ inputs.parallel_jobs }}
       ccache: ${{ inputs.ccache }}
-      lto_mode: ${{ inputs.lto_mode }}
-      tune_profile: ${{ inputs.tune_profile }}
-      kernel_repo: ${{ inputs.kernel_repo }}
-      kernel_ref: ${{ needs.resolve-ref.outputs.kernel_ref }}
 
   compile-arm64:
-    needs: resolve-ref
-    if: ${{ inputs.arm64_deb == true || inputs.arm64_rpm == true || inputs.arm64_tarxz == true || inputs.arm64_pkg == true }}
+    needs: prepare
+    if: ${{ needs.prepare.outputs.has_arm64 == 'true' }}
     uses: ./.github/workflows/compile-core.yml
     with:
-      runner: ubuntu-24.04-arm
       arch: arm64
+      arch_name: arm64
       deb_arch: arm64
       rpm_arch: aarch64
       arch_boot: arch/arm64/boot/Image
+      runner: ubuntu-24.04-arm
+      kernel_repo: ${{ inputs.kernel_repo }}
+      kernel_ref: ${{ inputs.kernel_ref }}
       config_choice: ${{ inputs.config_choice }}
+      config_custom: ${{ inputs.config_custom }}
       respect_config: ${{ inputs.respect_config }}
+      tune_profile: ${{ inputs.tune_profile }}
+      lto_mode: ${{ inputs.lto_mode }}
       include_headers: ${{ inputs.include_headers }}
       headers_full_tree: ${{ inputs.headers_full_tree }}
       strip_modules: ${{ inputs.strip_modules }}
       parallel_jobs: ${{ inputs.parallel_jobs }}
       ccache: ${{ inputs.ccache }}
-      lto_mode: ${{ inputs.lto_mode }}
-      tune_profile: ${{ inputs.tune_profile }}
-      kernel_repo: ${{ inputs.kernel_repo }}
-      kernel_ref: ${{ needs.resolve-ref.outputs.kernel_ref }}
 
   package-x86_64-deb:
     needs: compile-x86_64
-    if: ${{ inputs.x86_64_deb == true }}
+    if: ${{ contains(fromJSON(needs.prepare.outputs.x86_64_formats), 'deb') }}
     uses: ./.github/workflows/package-core.yml
     with:
-      runner: ubuntu-latest
       arch: x86_64
+      arch_name: x86_64
       deb_arch: amd64
       rpm_arch: x86_64
       format: deb
-      include_headers: ${{ inputs.include_headers }}
-      tarxz_include_headers: ${{ inputs.tarxz_include_headers }}
+      kver: ${{ needs.compile-x86_64.outputs.kver }}
 
   package-x86_64-rpm:
     needs: compile-x86_64
-    if: ${{ inputs.x86_64_rpm == true }}
+    if: ${{ contains(fromJSON(needs.prepare.outputs.x86_64_formats), 'rpm') }}
     uses: ./.github/workflows/package-core.yml
     with:
-      runner: ubuntu-latest
       arch: x86_64
+      arch_name: x86_64
       deb_arch: amd64
       rpm_arch: x86_64
       format: rpm
-      include_headers: ${{ inputs.include_headers }}
-      tarxz_include_headers: ${{ inputs.tarxz_include_headers }}
+      kver: ${{ needs.compile-x86_64.outputs.kver }}
 
   package-x86_64-tarxz:
     needs: compile-x86_64
-    if: ${{ inputs.x86_64_tarxz == true }}
+    if: ${{ contains(fromJSON(needs.prepare.outputs.x86_64_formats), 'tarxz') }}
     uses: ./.github/workflows/package-core.yml
     with:
-      runner: ubuntu-latest
       arch: x86_64
+      arch_name: x86_64
       deb_arch: amd64
       rpm_arch: x86_64
       format: tarxz
-      include_headers: ${{ inputs.include_headers }}
-      tarxz_include_headers: ${{ inputs.tarxz_include_headers }}
+      kver: ${{ needs.compile-x86_64.outputs.kver }}
 
   package-x86_64-pkg:
     needs: compile-x86_64
-    if: ${{ inputs.x86_64_pkg == true }}
+    if: ${{ contains(fromJSON(needs.prepare.outputs.x86_64_formats), 'pkg') }}
     uses: ./.github/workflows/package-core.yml
     with:
-      runner: ubuntu-latest
       arch: x86_64
+      arch_name: x86_64
       deb_arch: amd64
       rpm_arch: x86_64
       format: pkg
-      include_headers: ${{ inputs.include_headers }}
-      tarxz_include_headers: ${{ inputs.tarxz_include_headers }}
+      kver: ${{ needs.compile-x86_64.outputs.kver }}
 
   package-arm64-deb:
     needs: compile-arm64
-    if: ${{ inputs.arm64_deb == true }}
+    if: ${{ contains(fromJSON(needs.prepare.outputs.arm64_formats), 'deb') }}
     uses: ./.github/workflows/package-core.yml
     with:
-      runner: ubuntu-24.04-arm
       arch: arm64
+      arch_name: arm64
       deb_arch: arm64
       rpm_arch: aarch64
       format: deb
-      include_headers: ${{ inputs.include_headers }}
-      tarxz_include_headers: ${{ inputs.tarxz_include_headers }}
+      kver: ${{ needs.compile-arm64.outputs.kver }}
 
   package-arm64-rpm:
     needs: compile-arm64
-    if: ${{ inputs.arm64_rpm == true }}
+    if: ${{ contains(fromJSON(needs.prepare.outputs.arm64_formats), 'rpm') }}
     uses: ./.github/workflows/package-core.yml
     with:
-      runner: ubuntu-24.04-arm
       arch: arm64
+      arch_name: arm64
       deb_arch: arm64
       rpm_arch: aarch64
       format: rpm
-      include_headers: ${{ inputs.include_headers }}
-      tarxz_include_headers: ${{ inputs.tarxz_include_headers }}
+      kver: ${{ needs.compile-arm64.outputs.kver }}
 
   package-arm64-tarxz:
     needs: compile-arm64
-    if: ${{ inputs.arm64_tarxz == true }}
+    if: ${{ contains(fromJSON(needs.prepare.outputs.arm64_formats), 'tarxz') }}
     uses: ./.github/workflows/package-core.yml
     with:
-      runner: ubuntu-24.04-arm
       arch: arm64
+      arch_name: arm64
       deb_arch: arm64
       rpm_arch: aarch64
       format: tarxz
-      include_headers: ${{ inputs.include_headers }}
-      tarxz_include_headers: ${{ inputs.tarxz_include_headers }}
+      kver: ${{ needs.compile-arm64.outputs.kver }}
 
   package-arm64-pkg:
     needs: compile-arm64
-    if: ${{ inputs.arm64_pkg == true }}
+    if: ${{ contains(fromJSON(needs.prepare.outputs.arm64_formats), 'pkg') }}
     uses: ./.github/workflows/package-core.yml
     with:
-      runner: ubuntu-24.04-arm
       arch: arm64
+      arch_name: arm64
       deb_arch: arm64
       rpm_arch: aarch64
       format: pkg
-      include_headers: ${{ inputs.include_headers }}
-      tarxz_include_headers: ${{ inputs.tarxz_include_headers }}
+      kver: ${{ needs.compile-arm64.outputs.kver }}
 
   publish:
     needs:
@@ -333,22 +284,23 @@ jobs:
       - package-arm64-pkg
     if: ${{ inputs.release_tag != '' && !cancelled() }}
     runs-on: ubuntu-latest
-    concurrency:
-      group: release-${{ inputs.release_tag }}
-      cancel-in-progress: false
+    permissions:
+      contents: write
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
-          path: dist
           pattern: kernel-*
           merge-multiple: true
-      - run: |
-          ls -lh dist/
-          test -n "$(find dist -maxdepth 1 -type f -print -quit)"
-      - uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ inputs.release_tag }}
-          name: ${{ inputs.release_tag }}
-          files: dist/*
-          generate_release_notes: true
-          overwrite_files: true
+          path: release
+      - name: 生成 release
+        run: |
+          set -euo pipefail
+          cd release
+          find . -type f | head -50
+          gh release create "${{ inputs.release_tag }}" ./*.{deb,rpm,tar.xz,pkg.tar.zst} \
+            --title "Kernel ${{ inputs.kernel_ref }}" \
+            --notes "内核 ${{ inputs.kernel_ref }} 构建产物" \
+            --draft=false
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
