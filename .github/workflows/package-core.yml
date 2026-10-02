@@ -34,6 +34,34 @@ jobs:
           name: build-${{ inputs.arch }}
           path: build-artifacts
 
+      - name: 定位编译产物
+        id: locate
+        run: |
+          set -euo pipefail
+          SRC="$(pwd)/build-artifacts"
+          KVER="${{ inputs.kver }}"
+
+          # 编译 job 上传的目录是 dist/compile/${KVER}，但 download-artifact 会把它压平到 build-artifacts/
+          # 实际结构可能是 build-artifacts/${KVER}/... 或 build-artifacts/boot/...
+          # 这里做一个兼容查找
+          if [ -d "$SRC/boot" ]; then
+            ROOT="$SRC"
+            MODULES_DIR="$SRC/lib/modules"
+          elif [ -d "$SRC/$KVER/boot" ]; then
+            ROOT="$SRC/$KVER"
+            MODULES_DIR="$SRC/$KVER/lib/modules"
+          elif [ -d "$SRC/dist/compile/$KVER/boot" ]; then
+            ROOT="$SRC/dist/compile/$KVER"
+            MODULES_DIR="$SRC/dist/compile/$KVER/lib/modules"
+          else
+            echo "ERROR: 找不到编译产物 boot 目录" >&2
+            find "$SRC" -maxdepth 3 -type d | head -50 >&2
+            exit 1
+          fi
+
+          echo "ROOT=$ROOT" >> "$GITHUB_OUTPUT"
+          echo "MODULES_DIR=$MODULES_DIR" >> "$GITHUB_OUTPUT"
+
       - name: 安装打包工具
         run: |
           set -euo pipefail
@@ -47,18 +75,32 @@ jobs:
           DEB_ARCH="${{ inputs.deb_arch }}"
           RPM_ARCH="${{ inputs.rpm_arch }}"
           ARCH="${{ inputs.arch_name }}"
-          SRC="$(pwd)/build-artifacts"
+          SRC="${{ steps.locate.outputs.ROOT }}"
+          MODULES_DIR="${{ steps.locate.outputs.MODULES_DIR }}"
           OUT="$(pwd)/dist/${{ inputs.arch }}/${{ inputs.format }}"
           mkdir -p "$OUT"
+
+          # 用 find 容错匹配 vmlinuz / System.map / config
+          VMLINUZ="$(find "$SRC/boot" -maxdepth 1 -name 'vmlinuz-*' -print -quit)"
+          SYSTEM_MAP="$(find "$SRC/boot" -maxdepth 1 -name 'System.map-*' -print -quit)"
+          CONFIG_FILE="$(find "$SRC/boot" -maxdepth 1 -name 'config-*' -print -quit)"
+
+          [ -n "$VMLINUZ" ] || { echo "ERROR: vmlinuz 缺失" >&2; exit 1; }
+          [ -n "$SYSTEM_MAP" ] || { echo "ERROR: System.map 缺失" >&2; exit 1; }
+          [ -n "$CONFIG_FILE" ] || { echo "ERROR: config 缺失" >&2; exit 1; }
+
+          # 反查 modules 目录名，允许与 KVER 不同（如 7.2.8-gxxxx）
+          MODULES_KVER="$(basename "$(find "$MODULES_DIR" -maxdepth 1 -type d -name '7.2.8*' -print -quit)")"
+          [ -n "$MODULES_KVER" ] && [ -d "$MODULES_DIR/$MODULES_KVER" ] || { echo "ERROR: modules 目录缺失" >&2; exit 1; }
 
           case "${{ inputs.format }}" in
             deb)
               IMG_ROOT="$(mktemp -d)/linux-image-${KVER}"
               mkdir -p "$IMG_ROOT/DEBIAN" "$IMG_ROOT/boot" "$IMG_ROOT/lib/modules"
-              cp "$SRC/boot/vmlinuz-${KVER}" "$IMG_ROOT/boot/vmlinuz-${KVER}" 2>/dev/null || cp "$SRC/boot/"vmlinuz* "$IMG_ROOT/boot/vmlinuz-${KVER}"
-              cp "$SRC/boot/System.map-${KVER}" "$IMG_ROOT/boot/"
-              cp "$SRC/boot/config-${KVER}" "$IMG_ROOT/boot/"
-              cp -a "$SRC/lib/modules/${KVER}" "$IMG_ROOT/lib/modules/"
+              cp "$VMLINUZ" "$IMG_ROOT/boot/vmlinuz-${KVER}"
+              cp "$SYSTEM_MAP" "$IMG_ROOT/boot/"
+              cp "$CONFIG_FILE" "$IMG_ROOT/boot/"
+              cp -a "$MODULES_DIR/$MODULES_KVER" "$IMG_ROOT/lib/modules/${KVER}"
 
               printf '%s\n' \
                 "Package: linux-image-${KVER}" \
@@ -92,6 +134,7 @@ jobs:
               ;;
 
             rpm)
+              # 拆 KVER: 7.2.8-gxxxx → Version 7.2.8, Release gxxxx
               RPM_VER="$(echo "$KVER" | rev | cut -d'-' -f2- | rev)"
               RPM_REL="$(echo "$KVER" | rev | cut -d'-' -f1 | rev)"
               [ -z "$RPM_VER" ] && RPM_VER="$KVER"
@@ -122,10 +165,10 @@ jobs:
                 '%install' \
                 'rm -rf %{buildroot}' \
                 'mkdir -p %{buildroot}/boot %{buildroot}/lib/modules' \
-                "cp ${SRC}/boot/vmlinuz-${KVER} %{buildroot}/boot/ 2>/dev/null || :" \
-                "cp ${SRC}/boot/System.map-${KVER} %{buildroot}/boot/ 2>/dev/null || :" \
-                "cp ${SRC}/boot/config-${KVER} %{buildroot}/boot/ 2>/dev/null || :" \
-                "cp -a ${SRC}/lib/modules/${KVER} %{buildroot}/lib/modules/ 2>/dev/null || :" \
+                "cp ${VMLINUZ} %{buildroot}/boot/vmlinuz-${KVER}" \
+                "cp ${SYSTEM_MAP} %{buildroot}/boot/System.map-${KVER}" \
+                "cp ${CONFIG_FILE} %{buildroot}/boot/config-${KVER}" \
+                "cp -a ${MODULES_DIR}/${MODULES_KVER} %{buildroot}/lib/modules/${KVER}" \
                 '' \
                 '%files' \
                 "/boot/vmlinuz-${KVER}" \
@@ -174,10 +217,10 @@ jobs:
             tarxz)
               PKG_ROOT="$(mktemp -d)/linux-${KVER}-${ARCH}"
               mkdir -p "$PKG_ROOT/boot" "$PKG_ROOT/lib/modules"
-              cp "$SRC/boot/vmlinuz-${KVER}" "$PKG_ROOT/boot/vmlinuz-${KVER}" 2>/dev/null || cp "$SRC/boot/"vmlinuz* "$PKG_ROOT/boot/vmlinuz-${KVER}"
-              cp "$SRC/boot/System.map-${KVER}" "$PKG_ROOT/boot/"
-              cp "$SRC/boot/config-${KVER}" "$PKG_ROOT/boot/"
-              cp -a "$SRC/lib/modules/${KVER}" "$PKG_ROOT/lib/modules/"
+              cp "$VMLINUZ" "$PKG_ROOT/boot/vmlinuz-${KVER}"
+              cp "$SYSTEM_MAP" "$PKG_ROOT/boot/"
+              cp "$CONFIG_FILE" "$PKG_ROOT/boot/"
+              cp -a "$MODULES_DIR/$MODULES_KVER" "$PKG_ROOT/lib/modules/${KVER}"
 
               if [ -d "$SRC/headers" ]; then
                 mkdir -p "$PKG_ROOT/usr/src"
@@ -207,10 +250,10 @@ jobs:
             pkg)
               IMG_ROOT="$(mktemp -d)"
               mkdir -p "$IMG_ROOT/boot" "$IMG_ROOT/lib/modules"
-              cp "$SRC/boot/vmlinuz-${KVER}" "$IMG_ROOT/boot/vmlinuz-${KVER}" 2>/dev/null || cp "$SRC/boot/"vmlinuz* "$IMG_ROOT/boot/vmlinuz-${KVER}"
-              cp "$SRC/boot/System.map-${KVER}" "$IMG_ROOT/boot/"
-              cp "$SRC/boot/config-${KVER}" "$IMG_ROOT/boot/"
-              cp -a "$SRC/lib/modules/${KVER}" "$IMG_ROOT/lib/modules/"
+              cp "$VMLINUZ" "$IMG_ROOT/boot/vmlinuz-${KVER}"
+              cp "$SYSTEM_MAP" "$IMG_ROOT/boot/"
+              cp "$CONFIG_FILE" "$IMG_ROOT/boot/"
+              cp -a "$MODULES_DIR/$MODULES_KVER" "$IMG_ROOT/lib/modules/${KVER}"
 
               printf '%s\n' \
                 "pkgname = linux-image-${KVER}" \
