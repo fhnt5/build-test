@@ -37,7 +37,6 @@ jobs:
           set -euo pipefail
           SRC="$(pwd)/build-artifacts"
 
-          # 找到 vmlinuz 并反推 KVER
           VMLINUZ="$(find "$SRC" -maxdepth 4 -name 'vmlinuz-*' -print -quit)"
           [ -n "$VMLINUZ" ] || { echo "ERROR: 找不到 vmlinuz" >&2; find "$SRC" -maxdepth 4 -type f | head -50 >&2; exit 1; }
 
@@ -52,7 +51,6 @@ jobs:
           [ -d "$MODULES_DIR" ] || { echo "ERROR: 找不到 lib/modules" >&2; exit 1; }
           echo "MODULES_DIR=$MODULES_DIR" >> "$GITHUB_OUTPUT"
 
-          # System.map 和 config 用 find 容错匹配
           SYSTEM_MAP="$(find "$BOOT_DIR" -maxdepth 1 -name 'System.map-*' -print -quit)"
           CONFIG_FILE="$(find "$BOOT_DIR" -maxdepth 1 -name 'config-*' -print -quit)"
           [ -n "$SYSTEM_MAP" ] || { echo "ERROR: 找不到 System.map" >&2; exit 1; }
@@ -85,11 +83,7 @@ jobs:
           [ -n "$SYSTEM_MAP" ] || { echo "ERROR: System.map 缺失" >&2; exit 1; }
           [ -n "$CONFIG_FILE" ] || { echo "ERROR: config 缺失" >&2; exit 1; }
 
-          # 反查 modules 目录名，允许与 KVER 不同（如 7.2.8-gxxxx）
-          MODULES_KVER="$(basename "$(find "$MODULES_DIR" -maxdepth 1 -type d -name '7.2.8*' -print -quit)")"
-          if [ -z "$MODULES_KVER" ] || [ ! -d "$MODULES_DIR/$MODULES_KVER" ]; then
-            MODULES_KVER="$(basename "$(find "$MODULES_DIR" -mindepth 1 -maxdepth 1 -type d -print -quit)")"
-          fi
+          MODULES_KVER="$(basename "$(find "$MODULES_DIR" -mindepth 1 -maxdepth 1 -type d -print -quit)")"
           [ -n "$MODULES_KVER" ] && [ -d "$MODULES_DIR/$MODULES_KVER" ] || { echo "ERROR: modules 目录缺失" >&2; exit 1; }
           echo "MODULES_KVER=$MODULES_KVER" >&2
 
@@ -108,13 +102,42 @@ jobs:
                 "Architecture: ${DEB_ARCH}" \
                 "Maintainer: CI" \
                 "Description: Linux kernel ${KVER}" \
+                " Self-built kernel image and modules." \
                 > "$IMG_ROOT/DEBIAN/control"
 
+              # 安装后：depmod + 触发发行版钩子（含 initramfs-tools / zz-update-grub）+ 兜底生成 initrd 与更新引导
               printf '%s\n' \
                 '#!/bin/sh' \
-                "depmod ${KVER} || true" \
+                "depmod ${KVER} 2>/dev/null || true" \
+                'if [ -d /etc/kernel/postinst.d ]; then' \
+                "  run-parts --report /etc/kernel/postinst.d -- '${KVER}' '/boot/vmlinuz-${KVER}' || true" \
+                'fi' \
+                'if command -v update-initramfs >/dev/null 2>&1; then' \
+                "  update-initramfs -c -k '${KVER}' || true" \
+                'fi' \
+                'if command -v update-grub >/dev/null 2>&1; then' \
+                '  update-grub 2>/dev/null || true' \
+                'fi' \
+                'exit 0' \
                 > "$IMG_ROOT/DEBIAN/postinst"
               chmod 755 "$IMG_ROOT/DEBIAN/postinst"
+
+              # 卸载后：清 initrd + 触发发行版清理钩子
+              printf '%s\n' \
+                '#!/bin/sh' \
+                'if command -v update-initramfs >/dev/null 2>&1; then' \
+                "  update-initramfs -d -k '${KVER}' 2>/dev/null || true" \
+                'fi' \
+                "rm -f '/boot/initramfs-${KVER}.img' '/boot/initramfs-${KVER}-fallback.img' '/boot/initrd.img-${KVER}' '/boot/initrd-${KVER}' 2>/dev/null || true" \
+                'if [ -d /etc/kernel/postrm.d ]; then' \
+                "  run-parts --report /etc/kernel/postrm.d -- '${KVER}' || true" \
+                'fi' \
+                'if command -v update-grub >/dev/null 2>&1; then' \
+                '  update-grub 2>/dev/null || true' \
+                'fi' \
+                'exit 0' \
+                > "$IMG_ROOT/DEBIAN/postrm"
+              chmod 755 "$IMG_ROOT/DEBIAN/postrm"
 
               dpkg-deb --root-owner-group --build "$IMG_ROOT" "$OUT/linux-image-${KVER}_${DEB_ARCH}.deb"
 
@@ -128,6 +151,7 @@ jobs:
                   "Architecture: ${DEB_ARCH}" \
                   "Maintainer: CI" \
                   "Description: Headers for ${KVER}" \
+                  " Header files for self-built kernel ${KVER}." \
                   > "$HDR_ROOT/DEBIAN/control"
                 dpkg-deb --root-owner-group --build "$HDR_ROOT" "$OUT/linux-headers-${KVER}_${DEB_ARCH}.deb"
               fi
@@ -174,6 +198,29 @@ jobs:
                 "/boot/System.map-${KVER}" \
                 "/boot/config-${KVER}" \
                 "/lib/modules/${KVER}" \
+                '' \
+                '%post' \
+                "/sbin/depmod -a ${KVER} 2>/dev/null || true" \
+                'if [ -x /usr/bin/dracut ]; then' \
+                "  /usr/bin/dracut --force --kver ${KVER} /boot/initramfs-${KVER}.img 2>/dev/null || true" \
+                'fi' \
+                'if [ -x /usr/sbin/grub2-mkconfig ] && [ -d /boot/grub2 ]; then' \
+                '  /usr/sbin/grub2-mkconfig -o /boot/grub2/grub.cfg >/dev/null 2>&1 || true' \
+                'elif [ -x /usr/sbin/grub-mkconfig ] && [ -d /boot/grub ]; then' \
+                '  /usr/sbin/grub-mkconfig -o /boot/grub/grub.cfg >/dev/null 2>&1 || true' \
+                'fi' \
+                'if [ -x /usr/sbin/grubby ]; then' \
+                '  /usr/sbin/grubby --update-kernel=ALL >/dev/null 2>&1 || true' \
+                'fi' \
+                '' \
+                '%postun' \
+                "/sbin/depmod -a ${KVER} 2>/dev/null || true" \
+                "rm -f /boot/initramfs-${KVER}.img /boot/initramfs-${KVER}-fallback.img /boot/initrd-${KVER} 2>/dev/null || true" \
+                'if [ -x /usr/sbin/grub2-mkconfig ] && [ -d /boot/grub2 ]; then' \
+                '  /usr/sbin/grub2-mkconfig -o /boot/grub2/grub.cfg >/dev/null 2>&1 || true' \
+                'elif [ -x /usr/sbin/grub-mkconfig ] && [ -d /boot/grub ]; then' \
+                '  /usr/sbin/grub-mkconfig -o /boot/grub/grub.cfg >/dev/null 2>&1 || true' \
+                'fi' \
                 >> "$SPEC"
 
               rpmbuild --define "_topdir $RPM_TOPDIR" -bb "$SPEC" \
@@ -230,24 +277,65 @@ jobs:
                 cp -a "$SRC/headers" "$PKG_ROOT/usr/src/linux-headers-${KVER}"
               fi
 
+              PKG_BASENAME="$(basename "$PKG_ROOT")"
+
+              # 安装脚本：只拷贝文件 + depmod，initrd 与引导交给用户手动处理
               INST="$(pwd)/build-artifacts/install-${KVER}.sh"
               : > "$INST"
               printf '%s\n' \
                 '#!/bin/sh' \
                 'set -e' \
                 '[ "$(id -u)" = "0" ] || { echo "请 root 运行" >&2; exit 1; }' \
-                'mkdir -p /boot' \
-                "cp -a \"$(basename "$PKG_ROOT")/boot/\"* /boot/ 2>/dev/null || true" \
-                "cp -a \"$(basename "$PKG_ROOT")/lib/modules/${KVER}\" /lib/modules/ 2>/dev/null || true" \
-                "if [ -d \"$(basename "$PKG_ROOT")/usr/src/linux-headers-${KVER}\" ]; then cp -a \"$(basename "$PKG_ROOT")/usr/src/linux-headers-${KVER}\" /usr/src/; fi" \
-                "depmod ${KVER} 2>/dev/null || true" \
+                'mkdir -p /boot /lib/modules' \
+                "cp -a \"${PKG_BASENAME}/boot/\"* /boot/ 2>/dev/null || true" \
+                "cp -a \"${PKG_BASENAME}/lib/modules/${KVER}\" /lib/modules/ 2>/dev/null || true" \
+                "if [ -d \"${PKG_BASENAME}/usr/src/linux-headers-${KVER}\" ]; then mkdir -p /usr/src; cp -a \"${PKG_BASENAME}/usr/src/linux-headers-${KVER}\" /usr/src/; fi" \
+                "depmod ${KVER} 2>/dev/null || depmod -a 2>/dev/null || true" \
+                'echo "内核文件已安装到 /boot 与 /lib/modules。请手动生成 initrd 并更新引导："' \
+                "echo \"  Debian/Ubuntu : update-initramfs -c -k ${KVER} && update-grub\"" \
+                "echo \"  Fedora/RHEL   : dracut --force --kver ${KVER} && grub2-mkconfig -o /boot/grub2/grub.cfg\"" \
+                "echo \"  Arch/Manjaro  : mkinitcpio -k ${KVER} -g /boot/initramfs-${KVER}.img && grub-mkconfig -o /boot/grub/grub.cfg\"" \
+                "echo \"  Alpine        : mkinitfs -k ${KVER}\"" \
                 'echo "完成"' \
                 >> "$INST"
+
+              # 卸载脚本：自动清 initrd（覆盖各发行版命名）+ 删内核/模块/headers + depmod + 更新引导
+              UNINST="$(pwd)/build-artifacts/uninstall-${KVER}.sh"
+              : > "$UNINST"
+              printf '%s\n' \
+                '#!/bin/sh' \
+                'set -e' \
+                '[ "$(id -u)" = "0" ] || { echo "请 root 运行" >&2; exit 1; }' \
+                'echo "清理 initrd ..."' \
+                "rm -f '/boot/initramfs-${KVER}.img' '/boot/initramfs-${KVER}-fallback.img' '/boot/initrd.img-${KVER}' '/boot/initrd-${KVER}' '/boot/initramfs-genkernel-${KVER}' '/boot/initramfs-genkernel-x86_64-${KVER}' '/boot/initramfs-genkernel-aarch64-${KVER}' 2>/dev/null || true" \
+                'if command -v update-initramfs >/dev/null 2>&1; then' \
+                "  update-initramfs -d -k '${KVER}' 2>/dev/null || true" \
+                'fi' \
+                'echo "清理内核文件 ..."' \
+                "rm -f '/boot/vmlinuz-${KVER}' '/boot/System.map-${KVER}' '/boot/config-${KVER}' 2>/dev/null || true" \
+                "rm -rf '/lib/modules/${KVER}' 2>/dev/null || true" \
+                "rm -rf '/usr/src/linux-headers-${KVER}' 2>/dev/null || true" \
+                'command -v depmod >/dev/null 2>&1 && { depmod -a 2>/dev/null || true; }' \
+                'echo "更新引导 ..."' \
+                'if command -v update-grub >/dev/null 2>&1; then' \
+                '  update-grub 2>/dev/null || true' \
+                'elif command -v grub2-mkconfig >/dev/null 2>&1 && [ -d /boot/grub2 ]; then' \
+                '  grub2-mkconfig -o /boot/grub2/grub.cfg 2>/dev/null || true' \
+                'elif command -v grub-mkconfig >/dev/null 2>&1 && [ -d /boot/grub ]; then' \
+                '  grub-mkconfig -o /boot/grub/grub.cfg 2>/dev/null || true' \
+                'fi' \
+                'if [ -x /usr/sbin/grubby ]; then' \
+                '  /usr/sbin/grubby --update-kernel=ALL >/dev/null 2>&1 || true' \
+                'fi' \
+                'echo "卸载完成"' \
+                >> "$UNINST"
+
               cp "$INST" "$PKG_ROOT/"
-              chmod 755 "$PKG_ROOT/install-${KVER}.sh"
+              cp "$UNINST" "$PKG_ROOT/"
+              chmod 755 "$PKG_ROOT/install-${KVER}.sh" "$PKG_ROOT/uninstall-${KVER}.sh"
 
               cd "$(dirname "$PKG_ROOT")"
-              tar --owner=0 --group=0 --numeric-owner -cJf "$OUT/linux-${KVER}-${ARCH}.tar.xz" "$(basename "$PKG_ROOT")"
+              tar --owner=0 --group=0 --numeric-owner -cJf "$OUT/linux-${KVER}-${ARCH}.tar.xz" "$PKG_BASENAME"
               ;;
 
             pkg)
@@ -258,11 +346,37 @@ jobs:
               cp "$CONFIG_FILE" "$IMG_ROOT/boot/"
               cp -a "$MODULES_DIR/$MODULES_KVER" "$IMG_ROOT/lib/modules/${KVER}"
 
+              # .INSTALL：安装/升级时生成 initrd + 更新引导；卸载时清 initrd + 更新引导
+              printf '%s\n' \
+                'post_install() {' \
+                "  depmod ${KVER} 2>/dev/null || true" \
+                '  if command -v mkinitcpio >/dev/null 2>&1; then' \
+                "    mkinitcpio -k ${KVER} -g /boot/initramfs-${KVER}.img 2>/dev/null || true" \
+                '  fi' \
+                '  if command -v grub-mkconfig >/dev/null 2>&1; then' \
+                '    grub-mkconfig -o /boot/grub/grub.cfg >/dev/null 2>&1 || true' \
+                '  fi' \
+                '}' \
+                'post_upgrade() {' \
+                '  post_install' \
+                '}' \
+                'pre_remove() {' \
+                "  rm -f /boot/initramfs-${KVER}.img /boot/initramfs-${KVER}-fallback.img 2>/dev/null || true" \
+                '}' \
+                'post_remove() {' \
+                '  depmod -a 2>/dev/null || true' \
+                '  if command -v grub-mkconfig >/dev/null 2>&1; then' \
+                '    grub-mkconfig -o /boot/grub/grub.cfg >/dev/null 2>&1 || true' \
+                '  fi' \
+                '}' \
+                > "$IMG_ROOT/linux-image-${KVER}.install"
+
               printf '%s\n' \
                 "pkgname = linux-image-${KVER}" \
                 "pkgver = ${KVER}-1" \
                 "arch = ${ARCH}" \
                 "license = GPL-2.0-only" \
+                "install = linux-image-${KVER}.install" \
                 > "$IMG_ROOT/.PKGINFO"
 
               cd "$IMG_ROOT"
