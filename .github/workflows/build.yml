@@ -1,354 +1,300 @@
-name: Build Kernel
+name: Package Kernel Core
 
 on:
-  workflow_dispatch:
+  workflow_call:
     inputs:
-      x86_64_deb:
-        description: '构建 x86_64 deb'
-        type: boolean
-        default: true
-      x86_64_rpm:
-        description: '构建 x86_64 rpm'
-        type: boolean
-        default: false
-      x86_64_tarxz:
-        description: '构建 x86_64 tar.xz'
-        type: boolean
-        default: false
-      x86_64_pkg:
-        description: '构建 x86_64 pkg.tar.zst'
-        type: boolean
-        default: false
-      arm64_deb:
-        description: '构建 arm64 deb'
-        type: boolean
-        default: false
-      arm64_rpm:
-        description: '构建 arm64 rpm'
-        type: boolean
-        default: false
-      arm64_tarxz:
-        description: '构建 arm64 tar.xz'
-        type: boolean
-        default: false
-      arm64_pkg:
-        description: '构建 arm64 pkg.tar.zst'
-        type: boolean
-        default: false
-      config_choice:
-        description: '内核配置预设'
-        type: choice
-        default: 'default'
-        options:
-          - 'default'
-          - 'allyesconfig'
-          - 'allmodconfig'
-          - 'allnoconfig'
-          - 'tinyconfig'
-          - 'configs/G40_45.config'
-          - 'alma'
-          - 'alpine'
-          - 'arch'
-          - 'centos'
-          - 'debian'
-          - 'fedora'
-          - 'gentoo'
-          - 'kali'
-          - 'manjaro'
-          - 'nixos'
-          - 'opensuse'
-          - 'rhel'
-          - 'rocky'
-          - 'ubuntu'
-          - 'void'
-      config_custom:
-        description: '自定义配置路径或 URL（优先于上方选项）'
+      arch:
         type: string
-        default: ''
-      respect_config:
-        description: '严格模式：原样使用 .config，不执行调优与 LTO 修改'
-        type: boolean
-        default: true
-      include_headers:
-        description: '同时构建 headers 包'
-        type: boolean
-        default: true
-      headers_full_tree:
-        description: 'headers 完整源码树（关闭=仅最小子集）'
-        type: boolean
-        default: true
-      strip_modules:
-        description: '剥离内核模块调试符号'
-        type: boolean
-        default: false
-      tarxz_include_headers:
-        description: 'tar.xz 包内包含 headers 目录'
-        type: boolean
-        default: true
-      parallel_jobs:
-        description: '并行编译线程数'
-        type: choice
-        default: 'auto'
-        options: ['auto', '1', '2', '4', '8', '16']
-      ccache:
-        description: '启用 ccache 编译器缓存'
-        type: boolean
-        default: false
-      lto_mode:
-        description: 'LLVM 链接时优化'
-        type: choice
-        default: 'none'
-        options: ['none', 'full', 'thin']
-      tune_profile:
-        description: '调优预设（none=不修改 .config）'
-        type: choice
-        default: 'none'
-        options: ['none', 'default', 'performance', 'lowlatency', 'minimal', 'debugoff']
-      kernel_repo:
-        description: '内核源码仓库 URL'
+        required: true
+      arch_name:
         type: string
-        default: 'https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux-stable.git'
-      kernel_ref:
-        description: 'git 分支或标签（留空=自动取最新 stable）'
+        required: true
+      deb_arch:
         type: string
-        default: ''
-      release_tag:
-        description: '发布标签（留空=仅保留 artifact，不创建 Release）'
+        required: true
+      rpm_arch:
         type: string
-        default: ''
-
-permissions:
-  contents: write
+        required: true
+      format:
+        type: string
+        required: true
 
 jobs:
-  resolve-ref:
-    runs-on: ubuntu-latest
-    outputs:
-      kernel_ref: ${{ steps.resolve.outputs.kernel_ref }}
+  package:
+    runs-on: ${{ inputs.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
     steps:
-      - name: 解析内核版本引用
-        id: resolve
+      - uses: actions/checkout@v4
+
+      - name: 下载编译产物
+        uses: actions/download-artifact@v4
+        with:
+          name: build-${{ inputs.arch }}
+          path: build-artifacts
+
+      - name: 定位编译产物
+        id: locate
         run: |
           set -euo pipefail
-          INPUT_REF="${{ inputs.kernel_ref }}"
-          REPO="${{ inputs.kernel_repo }}"
+          SRC="$(pwd)/build-artifacts"
 
-          if [ -n "$INPUT_REF" ]; then
-            echo "kernel_ref=$INPUT_REF" >> "$GITHUB_OUTPUT"
-            exit 0
+          # 找到 vmlinuz 并反推 KVER
+          VMLINUZ="$(find "$SRC" -maxdepth 4 -name 'vmlinuz-*' -print -quit)"
+          [ -n "$VMLINUZ" ] || { echo "ERROR: 找不到 vmlinuz" >&2; find "$SRC" -maxdepth 4 -type f | head -50 >&2; exit 1; }
+
+          KVER="$(basename "$VMLINUZ" | sed 's/^vmlinuz-//')"
+          echo "KVER=$KVER" >> "$GITHUB_OUTPUT"
+
+          BOOT_DIR="$(dirname "$VMLINUZ")"
+          ROOT="$(dirname "$BOOT_DIR")"
+          echo "ROOT=$ROOT" >> "$GITHUB_OUTPUT"
+
+          MODULES_DIR="$ROOT/lib/modules"
+          [ -d "$MODULES_DIR" ] || { echo "ERROR: 找不到 lib/modules" >&2; exit 1; }
+          echo "MODULES_DIR=$MODULES_DIR" >> "$GITHUB_OUTPUT"
+
+          # System.map 和 config 用 find 容错匹配
+          SYSTEM_MAP="$(find "$BOOT_DIR" -maxdepth 1 -name 'System.map-*' -print -quit)"
+          CONFIG_FILE="$(find "$BOOT_DIR" -maxdepth 1 -name 'config-*' -print -quit)"
+          [ -n "$SYSTEM_MAP" ] || { echo "ERROR: 找不到 System.map" >&2; exit 1; }
+          [ -n "$CONFIG_FILE" ] || { echo "ERROR: 找不到 config" >&2; exit 1; }
+          echo "SYSTEM_MAP=$SYSTEM_MAP" >> "$GITHUB_OUTPUT"
+          echo "CONFIG_FILE=$CONFIG_FILE" >> "$GITHUB_OUTPUT"
+
+      - name: 安装打包工具
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends dpkg-dev rpm zstd xz-utils
+
+      - name: 打包 ${{ inputs.format }}
+        run: |
+          set -euo pipefail
+          KVER="${{ steps.locate.outputs.KVER }}"
+          DEB_ARCH="${{ inputs.deb_arch }}"
+          RPM_ARCH="${{ inputs.rpm_arch }}"
+          ARCH="${{ inputs.arch_name }}"
+          SRC="${{ steps.locate.outputs.ROOT }}"
+          MODULES_DIR="${{ steps.locate.outputs.MODULES_DIR }}"
+          VMLINUZ="$(find "$SRC/boot" -maxdepth 1 -name 'vmlinuz-*' -print -quit)"
+          SYSTEM_MAP="${{ steps.locate.outputs.SYSTEM_MAP }}"
+          CONFIG_FILE="${{ steps.locate.outputs.CONFIG_FILE }}"
+          OUT="$(pwd)/dist/${{ inputs.arch }}/${{ inputs.format }}"
+          mkdir -p "$OUT"
+
+          [ -n "$VMLINUZ" ] || { echo "ERROR: vmlinuz 缺失" >&2; exit 1; }
+          [ -n "$SYSTEM_MAP" ] || { echo "ERROR: System.map 缺失" >&2; exit 1; }
+          [ -n "$CONFIG_FILE" ] || { echo "ERROR: config 缺失" >&2; exit 1; }
+
+          # 反查 modules 目录名，允许与 KVER 不同（如 7.2.8-gxxxx）
+          MODULES_KVER="$(basename "$(find "$MODULES_DIR" -maxdepth 1 -type d -name '7.2.8*' -print -quit)")"
+          if [ -z "$MODULES_KVER" ] || [ ! -d "$MODULES_DIR/$MODULES_KVER" ]; then
+            MODULES_KVER="$(basename "$(find "$MODULES_DIR" -mindepth 1 -maxdepth 1 -type d -print -quit)")"
           fi
+          [ -n "$MODULES_KVER" ] && [ -d "$MODULES_DIR/$MODULES_KVER" ] || { echo "ERROR: modules 目录缺失" >&2; exit 1; }
+          echo "MODULES_KVER=$MODULES_KVER" >&2
 
-          if echo "$REPO" | grep -Eq '(^|/)linux-stable(\.git)?$'; then
-            STABLE_TAG="$(git ls-remote --tags --refs "$REPO" 2>/dev/null \
-              | awk -F/ '{print $NF}' \
-              | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
-              | sort -Vr \
-              | head -1 || true)"
-            if [ -n "$STABLE_TAG" ]; then
-              echo "kernel_ref=$STABLE_TAG" >> "$GITHUB_OUTPUT"
-              exit 0
-            fi
-          fi
+          case "${{ inputs.format }}" in
+            deb)
+              IMG_ROOT="$(mktemp -d)/linux-image-${KVER}"
+              mkdir -p "$IMG_ROOT/DEBIAN" "$IMG_ROOT/boot" "$IMG_ROOT/lib/modules"
+              cp "$VMLINUZ" "$IMG_ROOT/boot/vmlinuz-${KVER}"
+              cp "$SYSTEM_MAP" "$IMG_ROOT/boot/"
+              cp "$CONFIG_FILE" "$IMG_ROOT/boot/"
+              cp -a "$MODULES_DIR/$MODULES_KVER" "$IMG_ROOT/lib/modules/${KVER}"
 
-          PATTERN='^v?[0-9]+\.[0-9]+(\.[0-9]+)?(-[0-9A-Za-z._-]+)?$'
-          LATEST="$(git ls-remote --tags --refs --sort=-v:refname "$REPO" 2>/dev/null \
-            | awk -F/ '{print $NF}' | grep -E "$PATTERN" | head -1 || true)"
-          if [ -n "$LATEST" ]; then
-            echo "kernel_ref=$LATEST" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
+              printf '%s\n' \
+                "Package: linux-image-${KVER}" \
+                "Version: 1" \
+                "Architecture: ${DEB_ARCH}" \
+                "Maintainer: CI" \
+                "Description: Linux kernel ${KVER}" \
+                > "$IMG_ROOT/DEBIAN/control"
 
-          DEFAULT_BRANCH="$(git ls-remote --symref "$REPO" HEAD 2>/dev/null \
-            | awk '/^ref:/ {sub("refs/heads/","",$2); print $2; exit}' || true)"
-          if [ -n "$DEFAULT_BRANCH" ]; then
-            echo "kernel_ref=$DEFAULT_BRANCH" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
+              printf '%s\n' \
+                '#!/bin/sh' \
+                "depmod ${KVER} || true" \
+                > "$IMG_ROOT/DEBIAN/postinst"
+              chmod 755 "$IMG_ROOT/DEBIAN/postinst"
 
-          SHA="$(git ls-remote "$REPO" HEAD 2>/dev/null | awk '{print $1; exit}' || true)"
-          if [ -z "$SHA" ]; then
-            echo "ERROR: 无法解析仓库 $REPO 的版本引用" >&2
-            exit 1
-          fi
-          echo "kernel_ref=$SHA" >> "$GITHUB_OUTPUT"
+              dpkg-deb --root-owner-group --build "$IMG_ROOT" "$OUT/linux-image-${KVER}_${DEB_ARCH}.deb"
 
-  compile-x86_64:
-    needs: resolve-ref
-    if: ${{ inputs.x86_64_deb == true || inputs.x86_64_rpm == true || inputs.x86_64_tarxz == true || inputs.x86_64_pkg == true }}
-    uses: ./.github/workflows/compile-core.yml
-    with:
-      runner: ubuntu-latest
-      arch: x86_64
-      deb_arch: amd64
-      rpm_arch: x86_64
-      arch_boot: arch/x86/boot/bzImage
-      config_choice: ${{ inputs.config_choice }}
-      config_custom: ${{ inputs.config_custom }}
-      respect_config: ${{ inputs.respect_config }}
-      include_headers: ${{ inputs.include_headers }}
-      headers_full_tree: ${{ inputs.headers_full_tree }}
-      strip_modules: ${{ inputs.strip_modules }}
-      parallel_jobs: ${{ inputs.parallel_jobs }}
-      ccache: ${{ inputs.ccache }}
-      lto_mode: ${{ inputs.lto_mode }}
-      tune_profile: ${{ inputs.tune_profile }}
-      kernel_repo: ${{ inputs.kernel_repo }}
-      kernel_ref: ${{ needs.resolve-ref.outputs.kernel_ref }}
+              if [ -d "$SRC/headers" ]; then
+                HDR_ROOT="$(mktemp -d)/linux-headers-${KVER}"
+                mkdir -p "$HDR_ROOT/DEBIAN" "$HDR_ROOT/usr/src/linux-headers-${KVER}"
+                cp -a "$SRC/headers/." "$HDR_ROOT/usr/src/linux-headers-${KVER}/"
+                printf '%s\n' \
+                  "Package: linux-headers-${KVER}" \
+                  "Version: 1" \
+                  "Architecture: ${DEB_ARCH}" \
+                  "Maintainer: CI" \
+                  "Description: Headers for ${KVER}" \
+                  > "$HDR_ROOT/DEBIAN/control"
+                dpkg-deb --root-owner-group --build "$HDR_ROOT" "$OUT/linux-headers-${KVER}_${DEB_ARCH}.deb"
+              fi
+              ;;
 
-  compile-arm64:
-    needs: resolve-ref
-    if: ${{ inputs.arm64_deb == true || inputs.arm64_rpm == true || inputs.arm64_tarxz == true || inputs.arm64_pkg == true }}
-    uses: ./.github/workflows/compile-core.yml
-    with:
-      runner: ubuntu-24.04-arm
-      arch: arm64
-      deb_arch: arm64
-      rpm_arch: aarch64
-      arch_boot: arch/arm64/boot/Image
-      config_choice: ${{ inputs.config_choice }}
-      respect_config: ${{ inputs.respect_config }}
-      include_headers: ${{ inputs.include_headers }}
-      headers_full_tree: ${{ inputs.headers_full_tree }}
-      strip_modules: ${{ inputs.strip_modules }}
-      parallel_jobs: ${{ inputs.parallel_jobs }}
-      ccache: ${{ inputs.ccache }}
-      lto_mode: ${{ inputs.lto_mode }}
-      tune_profile: ${{ inputs.tune_profile }}
-      kernel_repo: ${{ inputs.kernel_repo }}
-      kernel_ref: ${{ needs.resolve-ref.outputs.kernel_ref }}
+            rpm)
+              RPM_VER="$(echo "$KVER" | rev | cut -d'-' -f2- | rev)"
+              RPM_REL="$(echo "$KVER" | rev | cut -d'-' -f1 | rev)"
+              [ -z "$RPM_VER" ] && RPM_VER="$KVER"
+              [ -z "$RPM_REL" ] && RPM_REL="1"
+              RPM_TOPDIR="$(mktemp -d)"
+              mkdir -p "$RPM_TOPDIR"/{BUILD,RPMS,SOURCES,SPECS,BUILDROOT}
 
-  package-x86_64-deb:
-    needs: compile-x86_64
-    if: ${{ inputs.x86_64_deb == true }}
-    uses: ./.github/workflows/package-core.yml
-    with:
-      runner: ubuntu-latest
-      arch: x86_64
-      deb_arch: amd64
-      rpm_arch: x86_64
-      format: deb
-      include_headers: ${{ inputs.include_headers }}
-      tarxz_include_headers: ${{ inputs.tarxz_include_headers }}
+              SPEC="$RPM_TOPDIR/SPECS/kernel-image.spec"
+              : > "$SPEC"
+              printf '%s\n' \
+                '%global debug_package %{nil}' \
+                '%global __strip /bin/true' \
+                '%global __find_provides %{nil}' \
+                '%global __find_requires %{nil}' \
+                '%define _unpackaged_files_terminate_build 0' \
+                '' \
+                "Name: kernel-image-${KVER}" \
+                "Version: ${RPM_VER}" \
+                "Release: ${RPM_REL}" \
+                "Summary: Linux kernel ${KVER}" \
+                "License: GPL-2.0-only" \
+                "AutoReqProv: no" \
+                "BuildArch: ${RPM_ARCH}" \
+                '' \
+                '%description' \
+                'Kernel image and modules' \
+                '' \
+                '%install' \
+                'rm -rf %{buildroot}' \
+                'mkdir -p %{buildroot}/boot %{buildroot}/lib/modules' \
+                "cp ${VMLINUZ} %{buildroot}/boot/vmlinuz-${KVER}" \
+                "cp ${SYSTEM_MAP} %{buildroot}/boot/System.map-${KVER}" \
+                "cp ${CONFIG_FILE} %{buildroot}/boot/config-${KVER}" \
+                "cp -a ${MODULES_DIR}/${MODULES_KVER} %{buildroot}/lib/modules/${KVER}" \
+                '' \
+                '%files' \
+                "/boot/vmlinuz-${KVER}" \
+                "/boot/System.map-${KVER}" \
+                "/boot/config-${KVER}" \
+                "/lib/modules/${KVER}" \
+                >> "$SPEC"
 
-  package-x86_64-rpm:
-    needs: compile-x86_64
-    if: ${{ inputs.x86_64_rpm == true }}
-    uses: ./.github/workflows/package-core.yml
-    with:
-      runner: ubuntu-latest
-      arch: x86_64
-      deb_arch: amd64
-      rpm_arch: x86_64
-      format: rpm
-      include_headers: ${{ inputs.include_headers }}
-      tarxz_include_headers: ${{ inputs.tarxz_include_headers }}
+              rpmbuild --define "_topdir $RPM_TOPDIR" -bb "$SPEC" \
+                || { echo "ERROR: rpmbuild kernel-image 失败" >&2; exit 1; }
 
-  package-x86_64-tarxz:
-    needs: compile-x86_64
-    if: ${{ inputs.x86_64_tarxz == true }}
-    uses: ./.github/workflows/package-core.yml
-    with:
-      runner: ubuntu-latest
-      arch: x86_64
-      deb_arch: amd64
-      rpm_arch: x86_64
-      format: tarxz
-      include_headers: ${{ inputs.include_headers }}
-      tarxz_include_headers: ${{ inputs.tarxz_include_headers }}
+              if [ -d "$SRC/headers" ]; then
+                HSPEC="$RPM_TOPDIR/SPECS/kernel-headers.spec"
+                : > "$HSPEC"
+                printf '%s\n' \
+                  '%global debug_package %{nil}' \
+                  '%global __strip /bin/true' \
+                  '%global __find_provides %{nil}' \
+                  '%global __find_requires %{nil}' \
+                  '%define _unpackaged_files_terminate_build 0' \
+                  '' \
+                  "Name: kernel-headers-${KVER}" \
+                  "Version: ${RPM_VER}" \
+                  "Release: ${RPM_REL}" \
+                  "Summary: Headers for ${KVER}" \
+                  "License: GPL-2.0-only" \
+                  "AutoReqProv: no" \
+                  "BuildArch: ${RPM_ARCH}" \
+                  '' \
+                  '%description' \
+                  'Kernel headers' \
+                  '' \
+                  '%install' \
+                  'rm -rf %{buildroot}' \
+                  "mkdir -p %{buildroot}/usr/src/linux-headers-${KVER}" \
+                  "cp -a ${SRC}/headers/. %{buildroot}/usr/src/linux-headers-${KVER}/" \
+                  '' \
+                  '%files' \
+                  "/usr/src/linux-headers-${KVER}" \
+                  >> "$HSPEC"
+                rpmbuild --define "_topdir $RPM_TOPDIR" -bb "$HSPEC" \
+                  || { echo "ERROR: rpmbuild kernel-headers 失败" >&2; exit 1; }
+              fi
 
-  package-x86_64-pkg:
-    needs: compile-x86_64
-    if: ${{ inputs.x86_64_pkg == true }}
-    uses: ./.github/workflows/package-core.yml
-    with:
-      runner: ubuntu-latest
-      arch: x86_64
-      deb_arch: amd64
-      rpm_arch: x86_64
-      format: pkg
-      include_headers: ${{ inputs.include_headers }}
-      tarxz_include_headers: ${{ inputs.tarxz_include_headers }}
+              find "$RPM_TOPDIR/RPMS" -name '*.rpm' -exec cp {} "$OUT/" \;
+              [ -n "$(find "$OUT" -name '*.rpm' -print -quit)" ] \
+                || { echo "ERROR: 未生成 rpm" >&2; exit 1; }
+              ;;
 
-  package-arm64-deb:
-    needs: compile-arm64
-    if: ${{ inputs.arm64_deb == true }}
-    uses: ./.github/workflows/package-core.yml
-    with:
-      runner: ubuntu-24.04-arm
-      arch: arm64
-      deb_arch: arm64
-      rpm_arch: aarch64
-      format: deb
-      include_headers: ${{ inputs.include_headers }}
-      tarxz_include_headers: ${{ inputs.tarxz_include_headers }}
+            tarxz)
+              PKG_ROOT="$(mktemp -d)/linux-${KVER}-${ARCH}"
+              mkdir -p "$PKG_ROOT/boot" "$PKG_ROOT/lib/modules"
+              cp "$VMLINUZ" "$PKG_ROOT/boot/vmlinuz-${KVER}"
+              cp "$SYSTEM_MAP" "$PKG_ROOT/boot/"
+              cp "$CONFIG_FILE" "$PKG_ROOT/boot/"
+              cp -a "$MODULES_DIR/$MODULES_KVER" "$PKG_ROOT/lib/modules/${KVER}"
 
-  package-arm64-rpm:
-    needs: compile-arm64
-    if: ${{ inputs.arm64_rpm == true }}
-    uses: ./.github/workflows/package-core.yml
-    with:
-      runner: ubuntu-24.04-arm
-      arch: arm64
-      deb_arch: arm64
-      rpm_arch: aarch64
-      format: rpm
-      include_headers: ${{ inputs.include_headers }}
-      tarxz_include_headers: ${{ inputs.tarxz_include_headers }}
+              if [ -d "$SRC/headers" ]; then
+                mkdir -p "$PKG_ROOT/usr/src"
+                cp -a "$SRC/headers" "$PKG_ROOT/usr/src/linux-headers-${KVER}"
+              fi
 
-  package-arm64-tarxz:
-    needs: compile-arm64
-    if: ${{ inputs.arm64_tarxz == true }}
-    uses: ./.github/workflows/package-core.yml
-    with:
-      runner: ubuntu-24.04-arm
-      arch: arm64
-      deb_arch: arm64
-      rpm_arch: aarch64
-      format: tarxz
-      include_headers: ${{ inputs.include_headers }}
-      tarxz_include_headers: ${{ inputs.tarxz_include_headers }}
+              INST="$(pwd)/build-artifacts/install-${KVER}.sh"
+              : > "$INST"
+              printf '%s\n' \
+                '#!/bin/sh' \
+                'set -e' \
+                '[ "$(id -u)" = "0" ] || { echo "请 root 运行" >&2; exit 1; }' \
+                'mkdir -p /boot' \
+                "cp -a \"$(basename "$PKG_ROOT")/boot/\"* /boot/ 2>/dev/null || true" \
+                "cp -a \"$(basename "$PKG_ROOT")/lib/modules/${KVER}\" /lib/modules/ 2>/dev/null || true" \
+                "if [ -d \"$(basename "$PKG_ROOT")/usr/src/linux-headers-${KVER}\" ]; then cp -a \"$(basename "$PKG_ROOT")/usr/src/linux-headers-${KVER}\" /usr/src/; fi" \
+                "depmod ${KVER} 2>/dev/null || true" \
+                'echo "完成"' \
+                >> "$INST"
+              cp "$INST" "$PKG_ROOT/"
+              chmod 755 "$PKG_ROOT/install-${KVER}.sh"
 
-  package-arm64-pkg:
-    needs: compile-arm64
-    if: ${{ inputs.arm64_pkg == true }}
-    uses: ./.github/workflows/package-core.yml
-    with:
-      runner: ubuntu-24.04-arm
-      arch: arm64
-      deb_arch: arm64
-      rpm_arch: aarch64
-      format: pkg
-      include_headers: ${{ inputs.include_headers }}
-      tarxz_include_headers: ${{ inputs.tarxz_include_headers }}
+              cd "$(dirname "$PKG_ROOT")"
+              tar --owner=0 --group=0 --numeric-owner -cJf "$OUT/linux-${KVER}-${ARCH}.tar.xz" "$(basename "$PKG_ROOT")"
+              ;;
 
-  publish:
-    needs:
-      - package-x86_64-deb
-      - package-x86_64-rpm
-      - package-x86_64-tarxz
-      - package-x86_64-pkg
-      - package-arm64-deb
-      - package-arm64-rpm
-      - package-arm64-tarxz
-      - package-arm64-pkg
-    if: ${{ inputs.release_tag != '' && !cancelled() }}
-    runs-on: ubuntu-latest
-    concurrency:
-      group: release-${{ inputs.release_tag }}
-      cancel-in-progress: false
-    steps:
-      - uses: actions/download-artifact@v4
+            pkg)
+              IMG_ROOT="$(mktemp -d)"
+              mkdir -p "$IMG_ROOT/boot" "$IMG_ROOT/lib/modules"
+              cp "$VMLINUZ" "$IMG_ROOT/boot/vmlinuz-${KVER}"
+              cp "$SYSTEM_MAP" "$IMG_ROOT/boot/"
+              cp "$CONFIG_FILE" "$IMG_ROOT/boot/"
+              cp -a "$MODULES_DIR/$MODULES_KVER" "$IMG_ROOT/lib/modules/${KVER}"
+
+              printf '%s\n' \
+                "pkgname = linux-image-${KVER}" \
+                "pkgver = ${KVER}-1" \
+                "arch = ${ARCH}" \
+                "license = GPL-2.0-only" \
+                > "$IMG_ROOT/.PKGINFO"
+
+              cd "$IMG_ROOT"
+              tar --owner=0 --group=0 --numeric-owner -cf - . | zstd -T0 -19 -o "$OUT/linux-image-${KVER}-${ARCH}.pkg.tar.zst" --force
+
+              if [ -d "$SRC/headers" ]; then
+                HDR_ROOT="$(mktemp -d)"
+                mkdir -p "$HDR_ROOT/usr/src/linux-headers-${KVER}"
+                cp -a "$SRC/headers/." "$HDR_ROOT/usr/src/linux-headers-${KVER}/"
+                printf '%s\n' \
+                  "pkgname = linux-headers-${KVER}" \
+                  "pkgver = ${KVER}-1" \
+                  "arch = ${ARCH}" \
+                  "license = GPL-2.0-only" \
+                  > "$HDR_ROOT/.PKGINFO"
+                cd "$HDR_ROOT"
+                tar --owner=0 --group=0 --numeric-owner -cf - . | zstd -T0 -19 -o "$OUT/linux-headers-${KVER}-${ARCH}.pkg.tar.zst" --force
+              fi
+              ;;
+          esac
+
+      - name: 上传 ${{ inputs.format }} 产物
+        if: ${{ always() && !cancelled() }}
+        uses: actions/upload-artifact@v4
         with:
-          path: dist
-          pattern: kernel-*
-          merge-multiple: true
-      - run: |
-          ls -lh dist/
-          test -n "$(find dist -maxdepth 1 -type f -print -quit)"
-      - uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ inputs.release_tag }}
-          name: ${{ inputs.release_tag }}
-          files: dist/*
-          generate_release_notes: true
-          overwrite_files: true
+          name: kernel-${{ inputs.arch }}-${{ inputs.format }}
+          path: dist/${{ inputs.arch }}/${{ inputs.format }}/**/*
+          retention-days: 7
+          if-no-files-found: error
+          compression-level: 0
+
+      - name: 产物清单
+        run: |
+          set -euo pipefail
+          find "dist/${{ inputs.arch }}/${{ inputs.format }}" -type f -exec ls -lh {} \; | awk '{print $5, $9}'
