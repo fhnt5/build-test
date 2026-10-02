@@ -294,20 +294,21 @@ jobs:
           KVER="${{ steps.compile.outputs.KVER }}"
           KIMAGE="${{ inputs.arch_boot }}"
 
-          STAGE_DIR="$(mktemp -d)"
-          echo "STAGE=$STAGE_DIR" >> "$GITHUB_OUTPUT"
+          OUT="${GITHUB_WORKSPACE}/dist/compile/${KVER}"
+          rm -rf "$OUT"
+          mkdir -p "$OUT/boot" "$OUT/lib/modules"
 
-          mkdir -p "$STAGE_DIR/boot"
-          cp "$KIMAGE" "$STAGE_DIR/boot/vmlinuz-${KVER}"
-          cp System.map "$STAGE_DIR/boot/System.map-${KVER}"
-          cp .config "$STAGE_DIR/boot/config-${KVER}"
+          cp "$KIMAGE" "$OUT/boot/vmlinuz-${KVER}"
+          cp System.map "$OUT/boot/System.map-${KVER}"
+          cp .config "$OUT/boot/config-${KVER}"
 
           if [ "${{ inputs.strip_modules }}" = "true" ]; then
-            make ARCH="$KARCH" modules_install INSTALL_MOD_PATH="$STAGE_DIR" INSTALL_MOD_STRIP=1
+            make ARCH="$KARCH" modules_install INSTALL_MOD_PATH="$OUT" INSTALL_MOD_STRIP=1
           else
-            make ARCH="$KARCH" modules_install INSTALL_MOD_PATH="$STAGE_DIR"
+            make ARCH="$KARCH" modules_install INSTALL_MOD_PATH="$OUT"
           fi
-          rm -f "$STAGE_DIR/lib/modules/${KVER}/build" "$STAGE_DIR/lib/modules/${KVER}/source"
+          rm -f "$OUT/lib/modules/${KVER}/build" "$OUT/lib/modules/${KVER}/source"
+          echo "OUT=$OUT" >> "$GITHUB_OUTPUT"
 
       - name: 暂存 headers
         id: headers
@@ -318,33 +319,37 @@ jobs:
           KARCH="${{ inputs.arch }}"
           KVER="${{ steps.compile.outputs.KVER }}"
 
-          HDR_DIR="$(mktemp -d)/linux-headers-${KVER}"
-          mkdir -p "$HDR_DIR/usr/src/linux-headers-${KVER}"
+          OUT="${{ steps.stage.outputs.OUT }}"
+          HDR="$OUT/headers"
+          rm -rf "$HDR"
+          mkdir -p "$HDR"
 
           if [ "${{ inputs.headers_full_tree }}" = "true" ]; then
-            cp -a include scripts arch "$HDR_DIR/usr/src/linux-headers-${KVER}/"
+            cp -a include "$HDR/"
+            cp -a scripts "$HDR/"
+            cp -a arch "$HDR/"
           else
-            cp -a include "$HDR_DIR/usr/src/linux-headers-${KVER}/"
-            mkdir -p "$HDR_DIR/usr/src/linux-headers-${KVER}/scripts"
+            cp -a include "$HDR/"
+            mkdir -p "$HDR/scripts"
             for d in basic mod package recordmk kernel; do
               if [ -d "scripts/$d" ]; then
-                cp -a "scripts/$d" "$HDR_DIR/usr/src/linux-headers-${KVER}/scripts/"
+                cp -a "scripts/$d" "$HDR/scripts/"
               fi
             done
-            mkdir -p "$HDR_DIR/usr/src/linux-headers-${KVER}/arch"
-            cp -a "arch/$KARCH" "$HDR_DIR/usr/src/linux-headers-${KVER}/arch/"
+            mkdir -p "$HDR/arch"
+            cp -a "arch/$KARCH" "$HDR/arch/"
           fi
-          cp Makefile .config Module.symvers Kbuild "$HDR_DIR/usr/src/linux-headers-${KVER}/" 2>/dev/null || true
+          cp Makefile .config Module.symvers Kbuild "$HDR/" 2>/dev/null || true
 
-          echo "HDR=$HDR_DIR" >> "$GITHUB_OUTPUT"
+          echo "HDR=$HDR" >> "$GITHUB_OUTPUT"
 
       - name: 上传编译产物
         if: ${{ always() && !cancelled() }}
         uses: actions/upload-artifact@v4
         with:
           name: build-${{ inputs.arch }}
-          path: |
-            ${{ steps.stage.outputs.STAGE }}/**/*
-            ${{ steps.headers.outputs.HDR }}/**/*
+          path: dist/compile/**/*
           retention-days: 1
           if-no-files-found: error
+          compression-level: 0
+          include-hidden-files: false
