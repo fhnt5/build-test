@@ -1,12 +1,12 @@
-name: Package Kernel
+name: Package Kernel Core
 
 on:
   workflow_call:
     inputs:
-      runner:
+      arch:
         type: string
         required: true
-      arch:
+      arch_name:
         type: string
         required: true
       deb_arch:
@@ -18,268 +18,227 @@ on:
       format:
         type: string
         required: true
-      include_headers:
-        type: boolean
-        default: true
-      tarxz_include_headers:
-        type: boolean
-        default: true
+      kver:
+        type: string
+        required: true
 
 jobs:
   package:
-    runs-on: ${{ inputs.runner }}
-    timeout-minutes: 60
+    runs-on: ${{ inputs.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: 安装打包工具
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y dpkg-dev rpm zstd xz-utils kmod jq
-
-      - uses: actions/download-artifact@v4
+      - name: 下载编译产物
+        uses: actions/download-artifact@v4
         with:
           name: build-${{ inputs.arch }}
-          path: build
+          path: build-artifacts
 
-      - name: 定位产物路径
-        id: locate
+      - name: 安装打包工具
         run: |
           set -euo pipefail
-          BOOT_DIR="$(find build -type d -name boot | head -1)"
-          if [ -z "$BOOT_DIR" ]; then
-            echo "ERROR: 未找到 boot 目录" >&2
-            find build -maxdepth 3 | head -20 >&2
-            exit 1
-          fi
-          VMLINUZ="$(ls -1 "$BOOT_DIR"/vmlinuz-* 2>/dev/null | head -1 || true)"
-          SYSTEM_MAP="$(ls -1 "$BOOT_DIR"/System.map-* 2>/dev/null | head -1 || true)"
-          CONFIG="$(ls -1 "$BOOT_DIR"/config-* 2>/dev/null | head -1 || true)"
-          MODULES_DIR="$(find build -type d -name 'lib' -exec find {} -maxdepth 3 -type d -name 'modules' \; 2>/dev/null | head -1 || true)"
-          KVER="$(basename "$VMLINUZ" | sed 's/^vmlinuz-//')"
-          HDR_DIR="$(find build -type d -name 'linux-headers-*' | head -1 || true)"
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends dpkg-dev rpm zstd xz-utils
 
-          echo "VMLINUZ=$VMLINUZ" >> "$GITHUB_OUTPUT"
-          echo "SYSTEM_MAP=$SYSTEM_MAP" >> "$GITHUB_OUTPUT"
-          echo "CONFIG=$CONFIG" >> "$GITHUB_OUTPUT"
-          echo "MODULES_DIR=$MODULES_DIR" >> "$GITHUB_OUTPUT"
-          echo "KVER=$KVER" >> "$GITHUB_OUTPUT"
-          echo "HDR=$HDR_DIR" >> "$GITHUB_OUTPUT"
-
-          echo "KVER=$KVER"
-          echo "MODULES_DIR=$MODULES_DIR"
-          echo "HDR=$HDR_DIR"
-
-      - name: 打包 deb
-        if: ${{ inputs.format == 'deb' }}
+      - name: 打包 ${{ inputs.format }}
         run: |
           set -euo pipefail
-          KVER="${{ steps.locate.outputs.KVER }}"
+          KVER="${{ inputs.kver }}"
           DEB_ARCH="${{ inputs.deb_arch }}"
-          OUT="dist/${{ inputs.arch }}/deb"
-          mkdir -p "$OUT"
-
-          IMG_DIR="$(mktemp -d)/linux-image-${KVER}"
-          mkdir -p "$IMG_DIR/DEBIAN" "$IMG_DIR/boot" "$IMG_DIR/lib/modules"
-          cp "${{ steps.locate.outputs.VMLINUZ }}" "$IMG_DIR/boot/vmlinuz-${KVER}"
-          cp "${{ steps.locate.outputs.SYSTEM_MAP }}" "$IMG_DIR/boot/System.map-${KVER}"
-          cp "${{ steps.locate.outputs.CONFIG }}" "$IMG_DIR/boot/config-${KVER}"
-          cp -a "${{ steps.locate.outputs.MODULES_DIR }}/${KVER}" "$IMG_DIR/lib/modules/"
-
-          printf '%s\n' \
-            "Package: linux-image-${KVER}" \
-            "Version: 1" \
-            "Architecture: ${DEB_ARCH}" \
-            "Maintainer: CI" \
-            "Description: Linux kernel ${KVER}" \
-            > "$IMG_DIR/DEBIAN/control"
-
-          printf '#!/bin/sh\ndepmod %s || true\n' "$KVER" > "$IMG_DIR/DEBIAN/postinst"
-          chmod 755 "$IMG_DIR/DEBIAN/postinst"
-
-          dpkg-deb --root-owner-group --build "$IMG_DIR" "${OUT}/linux-image-${KVER}_${DEB_ARCH}.deb"
-
-          if [ "${{ inputs.include_headers }}" = "true" ] && [ -n "${{ steps.locate.outputs.HDR }}" ]; then
-            HDR_DIR="$(mktemp -d)/linux-headers-${KVER}"
-            mkdir -p "$HDR_DIR/DEBIAN" "$HDR_DIR/usr/src/linux-headers-${KVER}"
-            cp -a "${{ steps.locate.outputs.HDR }}/usr/src/linux-headers-${KVER}/." "$HDR_DIR/usr/src/linux-headers-${KVER}/"
-
-            printf '%s\n' \
-              "Package: linux-headers-${KVER}" \
-              "Version: 1" \
-              "Architecture: ${DEB_ARCH}" \
-              "Maintainer: CI" \
-              "Description: Headers for ${KVER}" \
-              > "$HDR_DIR/DEBIAN/control"
-
-            dpkg-deb --root-owner-group --build "$HDR_DIR" "${OUT}/linux-headers-${KVER}_${DEB_ARCH}.deb"
-          fi
-
-      - name: 打包 rpm
-        if: ${{ inputs.format == 'rpm' }}
-        run: |
-          set -euo pipefail
-          KVER="${{ steps.locate.outputs.KVER }}"
           RPM_ARCH="${{ inputs.rpm_arch }}"
-          OUT="dist/${{ inputs.arch }}/rpm"
+          ARCH="${{ inputs.arch_name }}"
+          SRC="$(pwd)/build-artifacts"
+          OUT="$(pwd)/dist/${{ inputs.arch }}/${{ inputs.format }}"
           mkdir -p "$OUT"
 
-          RPM_VER="$(echo "$KVER" | rev | cut -d'-' -f2- | rev)"
-          RPM_REL="$(echo "$KVER" | rev | cut -d'-' -f1 | rev)"
-          RPM_REL="${RPM_REL}_1"
-          if [ -z "$RPM_VER" ]; then RPM_VER="$KVER"; fi
+          case "${{ inputs.format }}" in
+            deb)
+              IMG_ROOT="$(mktemp -d)/linux-image-${KVER}"
+              mkdir -p "$IMG_ROOT/DEBIAN" "$IMG_ROOT/boot" "$IMG_ROOT/lib/modules"
+              cp "$SRC/boot/vmlinuz-${KVER}" "$IMG_ROOT/boot/vmlinuz-${KVER}" 2>/dev/null || cp "$SRC/boot/"vmlinuz* "$IMG_ROOT/boot/vmlinuz-${KVER}"
+              cp "$SRC/boot/System.map-${KVER}" "$IMG_ROOT/boot/"
+              cp "$SRC/boot/config-${KVER}" "$IMG_ROOT/boot/"
+              cp -a "$SRC/lib/modules/${KVER}" "$IMG_ROOT/lib/modules/"
 
-          TOPDIR="$(mktemp -d)"
-          mkdir -p "$TOPDIR"/{BUILD,RPMS,SOURCES,SPECS,BUILDROOT}
+              printf '%s\n' \
+                "Package: linux-image-${KVER}" \
+                "Version: 1" \
+                "Architecture: ${DEB_ARCH}" \
+                "Maintainer: CI" \
+                "Description: Linux kernel ${KVER}" \
+                > "$IMG_ROOT/DEBIAN/control"
 
-          if [ "${{ inputs.include_headers }}" = "true" ] && [ -n "${{ steps.locate.outputs.HDR }}" ]; then
-            printf '%s\n' \
-              '%global debug_package %{nil}' \
-              '%global __strip /bin/true' \
-              '%global __find_provides %{nil}' \
-              '%global __find_requires %{nil}' \
-              '%define _unpackaged_files_terminate_build 0' \
-              '' \
-              "Name: kernel-headers-${KVER}" \
-              "Version: ${RPM_VER}" \
-              "Release: ${RPM_REL}" \
-              "Summary: Headers for ${KVER}" \
-              "License: GPL-2.0-only" \
-              "AutoReqProv: no" \
-              "BuildArch: ${RPM_ARCH}" \
-              '' \
-              '%description' \
-              'Kernel headers' \
-              '' \
-              '%install' \
-              'rm -rf %{buildroot}' \
-              "mkdir -p %{buildroot}/usr/src/linux-headers-${KVER}" \
-              "cp -a ${{ steps.locate.outputs.HDR }}/usr/src/linux-headers-${KVER}/. %{buildroot}/usr/src/linux-headers-${KVER}/" \
-              '' \
-              '%files' \
-              '/usr/src/linux-headers-${KVER}' \
-              > "$TOPDIR/SPECS/kernel-headers.spec"
-            rpmbuild --define "_topdir $TOPDIR" -bb "$TOPDIR/SPECS/kernel-headers.spec"
-          fi
+              printf '%s\n' \
+                '#!/bin/sh' \
+                "depmod ${KVER} || true" \
+                > "$IMG_ROOT/DEBIAN/postinst"
+              chmod 755 "$IMG_ROOT/DEBIAN/postinst"
 
-          printf '%s\n' \
-            '%global debug_package %{nil}' \
-            '%global __strip /bin/true' \
-            '%global __find_provides %{nil}' \
-            '%global __find_requires %{nil}' \
-            '%define _unpackaged_files_terminate_build 0' \
-            '' \
-            "Name: kernel-image-${KVER}" \
-            "Version: ${RPM_VER}" \
-            "Release: ${RPM_REL}" \
-            "Summary: Linux kernel ${KVER}" \
-            "License: GPL-2.0-only" \
-            "AutoReqProv: no" \
-            "BuildArch: ${RPM_ARCH}" \
-            '' \
-            '%description' \
-            'Kernel image and modules' \
-            '' \
-            '%install' \
-            'rm -rf %{buildroot}' \
-            'mkdir -p %{buildroot}/boot %{buildroot}/lib/modules' \
-            "cp ${{ steps.locate.outputs.VMLINUZ }} %{buildroot}/boot/vmlinuz-${KVER} 2>/dev/null || :" \
-            "cp ${{ steps.locate.outputs.SYSTEM_MAP }} %{buildroot}/boot/System.map-${KVER} 2>/dev/null || :" \
-            "cp ${{ steps.locate.outputs.CONFIG }} %{buildroot}/boot/config-${KVER} 2>/dev/null || :" \
-            "cp -a ${{ steps.locate.outputs.MODULES_DIR }}/${KVER} %{buildroot}/lib/modules/ 2>/dev/null || :" \
-            '' \
-            '%files' \
-            "/boot/vmlinuz-${KVER}" \
-            "/boot/System.map-${KVER}" \
-            "/boot/config-${KVER}" \
-            "/lib/modules/${KVER}" \
-            > "$TOPDIR/SPECS/kernel-image.spec"
-          rpmbuild --define "_topdir $TOPDIR" -bb "$TOPDIR/SPECS/kernel-image.spec"
+              dpkg-deb --root-owner-group --build "$IMG_ROOT" "$OUT/linux-image-${KVER}_${DEB_ARCH}.deb"
 
-          find "$TOPDIR/RPMS" -name '*.rpm' -exec cp {} "$OUT"/ \;
+              if [ -d "$SRC/headers" ]; then
+                HDR_ROOT="$(mktemp -d)/linux-headers-${KVER}"
+                mkdir -p "$HDR_ROOT/DEBIAN" "$HDR_ROOT/usr/src/linux-headers-${KVER}"
+                cp -a "$SRC/headers/." "$HDR_ROOT/usr/src/linux-headers-${KVER}/"
+                printf '%s\n' \
+                  "Package: linux-headers-${KVER}" \
+                  "Version: 1" \
+                  "Architecture: ${DEB_ARCH}" \
+                  "Maintainer: CI" \
+                  "Description: Headers for ${KVER}" \
+                  > "$HDR_ROOT/DEBIAN/control"
+                dpkg-deb --root-owner-group --build "$HDR_ROOT" "$OUT/linux-headers-${KVER}_${DEB_ARCH}.deb"
+              fi
+              ;;
 
-      - name: 打包 tar.xz
-        if: ${{ inputs.format == 'tarxz' }}
-        run: |
-          set -euo pipefail
-          KVER="${{ steps.locate.outputs.KVER }}"
-          ARCH="${{ inputs.arch }}"
-          OUT="dist/${{ inputs.arch }}/tarxz"
-          mkdir -p "$OUT"
+            rpm)
+              RPM_VER="$(echo "$KVER" | rev | cut -d'-' -f2- | rev)"
+              RPM_REL="$(echo "$KVER" | rev | cut -d'-' -f1 | rev)"
+              [ -z "$RPM_VER" ] && RPM_VER="$KVER"
+              [ -z "$RPM_REL" ] && RPM_REL="1"
+              RPM_TOPDIR="$(mktemp -d)"
+              mkdir -p "$RPM_TOPDIR"/{BUILD,RPMS,SOURCES,SPECS,BUILDROOT}
 
-          PKG_ROOT="$(mktemp -d)/linux-${KVER}-${ARCH}"
-          mkdir -p "$PKG_ROOT/boot" "$PKG_ROOT/lib/modules"
-          cp "${{ steps.locate.outputs.VMLINUZ }}" "$PKG_ROOT/boot/vmlinuz-${KVER}"
-          cp "${{ steps.locate.outputs.SYSTEM_MAP }}" "$PKG_ROOT/boot/"
-          cp "${{ steps.locate.outputs.CONFIG }}" "$PKG_ROOT/boot/"
-          cp -a "${{ steps.locate.outputs.MODULES_DIR }}/${KVER}" "$PKG_ROOT/lib/modules/"
+              SPEC="$RPM_TOPDIR/SPECS/kernel-image.spec"
+              : > "$SPEC"
+              printf '%s\n' \
+                '%global debug_package %{nil}' \
+                '%global __strip /bin/true' \
+                '%global __find_provides %{nil}' \
+                '%global __find_requires %{nil}' \
+                '%define _unpackaged_files_terminate_build 0' \
+                '' \
+                "Name: kernel-image-${KVER}" \
+                "Version: ${RPM_VER}" \
+                "Release: ${RPM_REL}" \
+                "Summary: Linux kernel ${KVER}" \
+                "License: GPL-2.0-only" \
+                "AutoReqProv: no" \
+                "BuildArch: ${RPM_ARCH}" \
+                '' \
+                '%description' \
+                'Kernel image and modules' \
+                '' \
+                '%install' \
+                'rm -rf %{buildroot}' \
+                'mkdir -p %{buildroot}/boot %{buildroot}/lib/modules' \
+                "cp ${SRC}/boot/vmlinuz-${KVER} %{buildroot}/boot/ 2>/dev/null || :" \
+                "cp ${SRC}/boot/System.map-${KVER} %{buildroot}/boot/ 2>/dev/null || :" \
+                "cp ${SRC}/boot/config-${KVER} %{buildroot}/boot/ 2>/dev/null || :" \
+                "cp -a ${SRC}/lib/modules/${KVER} %{buildroot}/lib/modules/ 2>/dev/null || :" \
+                '' \
+                '%files' \
+                "/boot/vmlinuz-${KVER}" \
+                "/boot/System.map-${KVER}" \
+                "/boot/config-${KVER}" \
+                "/lib/modules/${KVER}" \
+                >> "$SPEC"
 
-          if [ "${{ inputs.include_headers }}" = "true" ] && [ "${{ inputs.tarxz_include_headers }}" = "true" ] && [ -n "${{ steps.locate.outputs.HDR }}" ]; then
-            mkdir -p "$PKG_ROOT/usr/src"
-            cp -a "${{ steps.locate.outputs.HDR }}/usr/src/linux-headers-${KVER}" "$PKG_ROOT/usr/src/"
-          fi
+              rpmbuild --define "_topdir $RPM_TOPDIR" -bb "$SPEC"
 
-          printf '%s\n' \
-            '#!/bin/sh' \
-            'set -e' \
-            '[ "$(id -u)" = "0" ] || { echo "请 root 运行" >&2; exit 1; }' \
-            'KVER_SUB="__KVER__"' \
-            'cp -a boot/* /boot/ 2>/dev/null || true' \
-            'cp -a "lib/modules/${KVER_SUB}" /lib/modules/ 2>/dev/null || true' \
-            'if [ -d "usr/src/linux-headers-${KVER_SUB}" ]; then' \
-            '  cp -a "usr/src/linux-headers-${KVER_SUB}" /usr/src/' \
-            'fi' \
-            'depmod "${KVER_SUB}" 2>/dev/null || true' \
-            'echo "已安装 ${KVER_SUB}"' \
-            > "$PKG_ROOT/install-${KVER}.sh"
-          sed -i "s|__KVER__|${KVER}|g" "$PKG_ROOT/install-${KVER}.sh"
-          chmod 755 "$PKG_ROOT/install-${KVER}.sh"
+              if [ -d "$SRC/headers" ]; then
+                HSPEC="$RPM_TOPDIR/SPECS/kernel-headers.spec"
+                : > "$HSPEC"
+                printf '%s\n' \
+                  '%global debug_package %{nil}' \
+                  '%global __strip /bin/true' \
+                  '%global __find_provides %{nil}' \
+                  '%global __find_requires %{nil}' \
+                  '%define _unpackaged_files_terminate_build 0' \
+                  '' \
+                  "Name: kernel-headers-${KVER}" \
+                  "Version: ${RPM_VER}" \
+                  "Release: ${RPM_REL}" \
+                  "Summary: Headers for ${KVER}" \
+                  "License: GPL-2.0-only" \
+                  "AutoReqProv: no" \
+                  "BuildArch: ${RPM_ARCH}" \
+                  '' \
+                  '%description' \
+                  'Kernel headers' \
+                  '' \
+                  '%install' \
+                  'rm -rf %{buildroot}' \
+                  'mkdir -p %{buildroot}/usr/src/linux-headers-'${KVER} \
+                  "cp -a ${SRC}/headers/. %{buildroot}/usr/src/linux-headers-${KVER}/" \
+                  '' \
+                  '%files' \
+                  "/usr/src/linux-headers-${KVER}" \
+                  >> "$HSPEC"
+                rpmbuild --define "_topdir $RPM_TOPDIR" -bb "$HSPEC"
+              fi
 
-          cd "$(dirname "$PKG_ROOT")" && tar --owner=0 --group=0 --numeric-owner -cJf "$OLDPWD/${OUT}/linux-${KVER}-${ARCH}.tar.xz" "$(basename "$PKG_ROOT")"
+              find "$RPM_TOPDIR/RPMS" -name '*.rpm' -exec cp {} "$OUT/" \;
+              ;;
 
-      - name: 打包 pkg.tar.zst
-        if: ${{ inputs.format == 'pkg' }}
-        run: |
-          set -euo pipefail
-          KVER="${{ steps.locate.outputs.KVER }}"
-          ARCH="${{ inputs.arch }}"
-          OUT="dist/${{ inputs.arch }}/pkg"
-          mkdir -p "$OUT"
+            tarxz)
+              PKG_ROOT="$(mktemp -d)/linux-${KVER}-${ARCH}"
+              mkdir -p "$PKG_ROOT/boot" "$PKG_ROOT/lib/modules"
+              cp "$SRC/boot/vmlinuz-${KVER}" "$PKG_ROOT/boot/vmlinuz-${KVER}" 2>/dev/null || cp "$SRC/boot/"vmlinuz* "$PKG_ROOT/boot/vmlinuz-${KVER}"
+              cp "$SRC/boot/System.map-${KVER}" "$PKG_ROOT/boot/"
+              cp "$SRC/boot/config-${KVER}" "$PKG_ROOT/boot/"
+              cp -a "$SRC/lib/modules/${KVER}" "$PKG_ROOT/lib/modules/"
 
-          IMG_ROOT="$(mktemp -d)"
-          mkdir -p "$IMG_ROOT/boot" "$IMG_ROOT/lib/modules"
-          cp "${{ steps.locate.outputs.VMLINUZ }}" "$IMG_ROOT/boot/vmlinuz-${KVER}"
-          cp "${{ steps.locate.outputs.SYSTEM_MAP }}" "$IMG_ROOT/boot/"
-          cp "${{ steps.locate.outputs.CONFIG }}" "$IMG_ROOT/boot/"
-          cp -a "${{ steps.locate.outputs.MODULES_DIR }}/${KVER}" "$IMG_ROOT/lib/modules/"
+              if [ -d "$SRC/headers" ]; then
+                mkdir -p "$PKG_ROOT/usr/src"
+                cp -a "$SRC/headers" "$PKG_ROOT/usr/src/linux-headers-${KVER}"
+              fi
 
-          printf '%s\n' \
-            "pkgname = linux-image-${KVER}" \
-            "pkgver = ${KVER}-1" \
-            "arch = ${ARCH}" \
-            "license = GPL-2.0-only" \
-            > "$IMG_ROOT/.PKGINFO"
+              INST="$(pwd)/build-artifacts/install-${KVER}.sh"
+              : > "$INST"
+              printf '%s\n' \
+                '#!/bin/sh' \
+                'set -e' \
+                '[ "$(id -u)" = "0" ] || { echo "请 root 运行" >&2; exit 1; }' \
+                'mkdir -p /boot' \
+                "cp -a \"$(basename "$PKG_ROOT")/boot/\"* /boot/ 2>/dev/null || true" \
+                "cp -a \"$(basename "$PKG_ROOT")/lib/modules/${KVER}\" /lib/modules/ 2>/dev/null || true" \
+                "if [ -d \"$(basename "$PKG_ROOT")/usr/src/linux-headers-${KVER}\" ]; then cp -a \"$(basename "$PKG_ROOT")/usr/src/linux-headers-${KVER}\" /usr/src/; fi" \
+                "depmod ${KVER} 2>/dev/null || true" \
+                'echo "完成"' \
+                >> "$INST"
+              cp "$INST" "$PKG_ROOT/"
+              chmod 755 "$PKG_ROOT/install-${KVER}.sh"
 
-          cd "$IMG_ROOT" && tar --owner=0 --group=0 --numeric-owner -cf - . \
-            | zstd -T0 -19 --force -o "$OLDPWD/${OUT}/linux-image-${KVER}-${ARCH}.pkg.tar.zst"
+              cd "$(dirname "$PKG_ROOT")"
+              tar --owner=0 --group=0 --numeric-owner -cJf "$OUT/linux-${KVER}-${ARCH}.tar.xz" "$(basename "$PKG_ROOT")"
+              ;;
 
-          if [ "${{ inputs.include_headers }}" = "true" ] && [ -n "${{ steps.locate.outputs.HDR }}" ]; then
-            HDR_ROOT="$(mktemp -d)"
-            mkdir -p "$HDR_ROOT/usr/src/linux-headers-${KVER}"
-            cp -a "${{ steps.locate.outputs.HDR }}/usr/src/linux-headers-${KVER}/." "$HDR_ROOT/usr/src/linux-headers-${KVER}/"
+            pkg)
+              IMG_ROOT="$(mktemp -d)"
+              mkdir -p "$IMG_ROOT/boot" "$IMG_ROOT/lib/modules"
+              cp "$SRC/boot/vmlinuz-${KVER}" "$IMG_ROOT/boot/vmlinuz-${KVER}" 2>/dev/null || cp "$SRC/boot/"vmlinuz* "$IMG_ROOT/boot/vmlinuz-${KVER}"
+              cp "$SRC/boot/System.map-${KVER}" "$IMG_ROOT/boot/"
+              cp "$SRC/boot/config-${KVER}" "$IMG_ROOT/boot/"
+              cp -a "$SRC/lib/modules/${KVER}" "$IMG_ROOT/lib/modules/"
 
-            printf '%s\n' \
-              "pkgname = linux-headers-${KVER}" \
-              "pkgver = ${KVER}-1" \
-              "arch = ${ARCH}" \
-              "license = GPL-2.0-only" \
-              > "$HDR_ROOT/.PKGINFO"
+              printf '%s\n' \
+                "pkgname = linux-image-${KVER}" \
+                "pkgver = ${KVER}-1" \
+                "arch = ${ARCH}" \
+                "license = GPL-2.0-only" \
+                > "$IMG_ROOT/.PKGINFO"
 
-            cd "$HDR_ROOT" && tar --owner=0 --group=0 --numeric-owner -cf - . \
-              | zstd -T0 -19 --force -o "$OLDPWD/${OUT}/linux-headers-${KVER}-${ARCH}.pkg.tar.zst"
-          fi
+              cd "$IMG_ROOT"
+              tar --owner=0 --group=0 --numeric-owner -cf - . | zstd -T0 -19 -o "$OUT/linux-image-${KVER}-${ARCH}.pkg.tar.zst" --force
 
-      - name: 上传产物
+              if [ -d "$SRC/headers" ]; then
+                HDR_ROOT="$(mktemp -d)"
+                mkdir -p "$HDR_ROOT/usr/src/linux-headers-${KVER}"
+                cp -a "$SRC/headers/." "$HDR_ROOT/usr/src/linux-headers-${KVER}/"
+                printf '%s\n' \
+                  "pkgname = linux-headers-${KVER}" \
+                  "pkgver = ${KVER}-1" \
+                  "arch = ${ARCH}" \
+                  "license = GPL-2.0-only" \
+                  > "$HDR_ROOT/.PKGINFO"
+                cd "$HDR_ROOT"
+                tar --owner=0 --group=0 --numeric-owner -cf - . | zstd -T0 -19 -o "$OUT/linux-headers-${KVER}-${ARCH}.pkg.tar.zst" --force
+              fi
+              ;;
+          esac
+
+      - name: 上传 ${{ inputs.format }} 产物
         if: ${{ always() && !cancelled() }}
         uses: actions/upload-artifact@v4
         with:
@@ -287,7 +246,9 @@ jobs:
           path: dist/${{ inputs.arch }}/${{ inputs.format }}/**/*
           retention-days: 7
           if-no-files-found: error
+          compression-level: 0
 
-      - name: 列出产物
-        if: ${{ always() && !cancelled() }}
-        run: find "dist/${{ inputs.arch }}/${{ inputs.format }}" -type f -exec ls -lh {} \; 2>/dev/null || true
+      - name: 产物清单
+        run: |
+          set -euo pipefail
+          find "dist/${{ inputs.arch }}/${{ inputs.format }}" -type f -exec ls -lh {} \; | awk '{print $5, $9}'
