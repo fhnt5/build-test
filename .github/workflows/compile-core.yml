@@ -158,10 +158,24 @@ jobs:
           if [ "${{ inputs.respect_config }}" != "true" ]; then
             sed -i '/^CONFIG_LD_ORPHAN_WARN_LEVEL=/d' .config
             echo 'CONFIG_LD_ORPHAN_WARN_LEVEL="warn"' >> .config
+            if grep -q '^CONFIG_LOCALVERSION_AUTO=' .config; then
+              sed -i 's/^CONFIG_LOCALVERSION_AUTO=.*/CONFIG_LOCALVERSION_AUTO=y/' .config
+            else
+              echo 'CONFIG_LOCALVERSION_AUTO=y' >> .config
+            fi
             make ARCH="$KARCH" olddefconfig </dev/null
           else
-            grep -q '^CONFIG_LD_ORPHAN_WARN_LEVEL=' .config || echo 'CONFIG_LD_ORPHAN_WARN_LEVEL="warn"' >> .config
-            grep -q '^CONFIG_LOCALVERSION_AUTO=' .config || echo 'CONFIG_LOCALVERSION_AUTO=y' >> .config
+            if grep -q '^CONFIG_LD_ORPHAN_WARN_LEVEL=' .config; then
+              sed -i 's/^CONFIG_LD_ORPHAN_WARN_LEVEL=.*/CONFIG_LD_ORPHAN_WARN_LEVEL="warn"/' .config
+            else
+              echo 'CONFIG_LD_ORPHAN_WARN_LEVEL="warn"' >> .config
+            fi
+            if grep -q '^CONFIG_LOCALVERSION_AUTO=' .config; then
+              sed -i 's/^CONFIG_LOCALVERSION_AUTO=.*/CONFIG_LOCALVERSION_AUTO=y/' .config
+            else
+              echo 'CONFIG_LOCALVERSION_AUTO=y' >> .config
+            fi
+            make ARCH="$KARCH" olddefconfig </dev/null
           fi
 
       - name: 应用调优预设
@@ -173,11 +187,11 @@ jobs:
 
           case "${{ inputs.tune_profile }}" in
             performance)
-              for c in NO_HZ_FULL RCU_NOCBS PREEMPT_DYNAMIC CPU_FREQ_DEFAULT_GOV_PERFORMANCE; do
+              for c in NO_HZ_FULL PREEMPT_DYNAMIC CPU_FREQ_DEFAULT_GOV_PERFORMANCE RCU_NOCB_CPU RCU_NOCB_CPU_DEFAULT_ALL; do
                 sed -i "/^CONFIG_${c}=/d" .config
                 echo "CONFIG_${c}=y" >> .config
               done
-              for c in MITIGATION_RETPOLINE MITIGATION_SPECTRE_BHI MITIGATION_IBPB_ENTRY MITIGATION_IBRS_ENTRY MITIGATION_L1TF MITIGATION_PTI; do
+              for c in MITIGATION_RETPOLINE MITIGATION_SPECTRE_BHI MITIGATION_IBPB_ENTRY MITIGATION_IBRS_ENTRY MITIGATION_L1TF MITIGATION_PTI RETPOLINE CPU_IBPB_ENTRY CPU_IBRS_ENTRY PAGE_TABLE_ISOLATION; do
                 sed -i "/^CONFIG_${c}=/d" .config
                 echo "# CONFIG_${c} is not set" >> .config
               done
@@ -204,10 +218,15 @@ jobs:
               done
               ;;
             debugoff)
-              for c in KASAN KMSAN KCSAN KFENCE KMEMLEAK DEBUG_INFO DWARF_TOOLCHAIN_DEFAULT FTRACE FUNCTION_TRACER FUNCTION_GRAPH_TRACER STACK_TRACER KPROBES UPROBES TRACEPOINTS DEBUG_FS SLUB_DEBUG DEBUG_PAGEALLOC DEBUG_KMEMLEAK DEBUG_STACK_USAGE SCHEDSTATS LATENCYTOP LOCK_STAT; do
+              for c in KASAN KMSAN KCSAN KFENCE KMEMLEAK FTRACE FUNCTION_TRACER FUNCTION_GRAPH_TRACER STACK_TRACER KPROBES UPROBES TRACEPOINTS DEBUG_FS SLUB_DEBUG DEBUG_PAGEALLOC DEBUG_KMEMLEAK DEBUG_STACK_USAGE SCHEDSTATS LATENCYTOP LOCK_STAT; do
                 sed -i "/^CONFIG_${c}=/d" .config
                 echo "# CONFIG_${c} is not set" >> .config
               done
+              for c in DEBUG_INFO DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT DEBUG_INFO_DWARF4 DEBUG_INFO_DWARF5 DEBUG_INFO_REDUCED DEBUG_INFO_COMPRESSED DEBUG_INFO_SPLIT DEBUG_INFO_BTF; do
+                sed -i "/^CONFIG_${c}=/d" .config
+              done
+              sed -i '/^CONFIG_DEBUG_INFO_NONE=/d' .config
+              echo "CONFIG_DEBUG_INFO_NONE=y" >> .config
               ;;
             default)
               for c in DEBUG_BUGVERBOSE DEBUG_LIST DEBUG_SG DEBUG_NOTIFIERS DEBUG_CREDENTIALS RCU_TRACE SCHED_DEBUG PRINTK_TIME DYNAMIC_DEBUG DEBUG_ATOMIC_SLEEP DEBUG_PREEMPT DEBUG_SPINLOCK DEBUG_MUTEXES DEBUG_RT_MUTEXES DEBUG_WW_MUTEX_SLOWPATH DEBUG_LOCK_ALLOC DEBUG_LOCKDEP DEBUG_KOBJECT DEBUG_KOBJECT_RELEASE; do
@@ -269,12 +288,6 @@ jobs:
 
           MAKE_ARGS="ARCH=$KARCH -j$JOBS"
 
-          if [ "${{ inputs.ccache }}" = "true" ]; then
-            export PATH="/usr/lib/ccache:$PATH"
-            export CC="ccache gcc"
-            export HOSTCC="ccache gcc"
-          fi
-
           if [ "${{ inputs.lto_mode }}" != "none" ]; then
             MAKE_ARGS="$MAKE_ARGS LLVM=1"
           fi
@@ -331,7 +344,7 @@ jobs:
           else
             cp -a include "$HDR/"
             mkdir -p "$HDR/scripts"
-            for d in basic mod package recordmk kernel; do
+            for d in basic mod package recordmcount kernel; do
               if [ -d "scripts/$d" ]; then
                 cp -a "scripts/$d" "$HDR/scripts/"
               fi
