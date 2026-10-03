@@ -36,7 +36,7 @@ on:
         type: boolean
         default: false
       config_choice:
-        description: '内核配置预设'
+        description: '内核配置预设（有 config_custom 时此项被覆盖）'
         type: choice
         default: 'default'
         options:
@@ -45,7 +45,6 @@ on:
           - 'allmodconfig'
           - 'allnoconfig'
           - 'tinyconfig'
-          - 'configs/G40_45.config'
           - 'alma'
           - 'alpine'
           - 'arch'
@@ -62,7 +61,7 @@ on:
           - 'ubuntu'
           - 'void'
       config_custom:
-        description: '自定义配置路径或 URL（优先于上方选项）'
+        description: '自定义配置路径或 URL（例如 configs/G40_45.config，或 http(s)://...）'
         type: string
         default: ''
       respect_config:
@@ -81,10 +80,6 @@ on:
         description: '剥离内核模块调试符号'
         type: boolean
         default: false
-      tarxz_include_headers:
-        description: 'tar.xz 包内包含 headers 目录'
-        type: boolean
-        default: true
       parallel_jobs:
         description: '并行编译线程数'
         type: choice
