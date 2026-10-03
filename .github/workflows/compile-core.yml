@@ -156,25 +156,12 @@ jobs:
           cp "$CONFIG_OUT" .config
 
           if [ "${{ inputs.respect_config }}" != "true" ]; then
-            sed -i '/^CONFIG_LD_ORPHAN_WARN_LEVEL=/d' .config
-            echo 'CONFIG_LD_ORPHAN_WARN_LEVEL="warn"' >> .config
-            if grep -q '^CONFIG_LOCALVERSION_AUTO=' .config; then
-              sed -i 's/^CONFIG_LOCALVERSION_AUTO=.*/CONFIG_LOCALVERSION_AUTO=y/' .config
-            else
-              echo 'CONFIG_LOCALVERSION_AUTO=y' >> .config
-            fi
+            scripts/config --file .config --set-str LD_ORPHAN_WARN_LEVEL "warn" || true
+            scripts/config --file .config --enable LOCALVERSION_AUTO || true
             make ARCH="$KARCH" olddefconfig </dev/null
           else
-            if grep -q '^CONFIG_LD_ORPHAN_WARN_LEVEL=' .config; then
-              sed -i 's/^CONFIG_LD_ORPHAN_WARN_LEVEL=.*/CONFIG_LD_ORPHAN_WARN_LEVEL="warn"/' .config
-            else
-              echo 'CONFIG_LD_ORPHAN_WARN_LEVEL="warn"' >> .config
-            fi
-            if grep -q '^CONFIG_LOCALVERSION_AUTO=' .config; then
-              sed -i 's/^CONFIG_LOCALVERSION_AUTO=.*/CONFIG_LOCALVERSION_AUTO=y/' .config
-            else
-              echo 'CONFIG_LOCALVERSION_AUTO=y' >> .config
-            fi
+            scripts/config --file .config --set-str LD_ORPHAN_WARN_LEVEL "warn" || true
+            scripts/config --file .config --enable LOCALVERSION_AUTO || true
             make ARCH="$KARCH" olddefconfig </dev/null
           fi
 
@@ -187,28 +174,25 @@ jobs:
 
           case "${{ inputs.tune_profile }}" in
             minimal)
-              sed -i '/^CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE=/d' .config
-              echo "CONFIG_CC_OPTIMIZE_FOR_SIZE=y" >> .config
+              scripts/config --file .config --enable CC_OPTIMIZE_FOR_SIZE || true
+              scripts/config --file .config --disable CC_OPTIMIZE_FOR_PERFORMANCE || true
               for c in MODULE_SIG MODULE_SIG_ALL MODULE_SIG_FORCE; do
-                sed -i "/^CONFIG_${c}=/d" .config
-                echo "# CONFIG_${c} is not set" >> .config
+                scripts/config --file .config --disable "$c" || true
               done
               ;;
             debugoff)
               for c in KASAN KMSAN KCSAN KFENCE KMEMLEAK FTRACE FUNCTION_TRACER FUNCTION_GRAPH_TRACER STACK_TRACER KPROBES UPROBES TRACEPOINTS DEBUG_FS SLUB_DEBUG DEBUG_PAGEALLOC DEBUG_KMEMLEAK DEBUG_STACK_USAGE SCHEDSTATS LATENCYTOP LOCK_STAT; do
-                sed -i "/^CONFIG_${c}=/d" .config
-                echo "# CONFIG_${c} is not set" >> .config
+                scripts/config --file .config --disable "$c" || true
               done
-              for c in DEBUG_INFO DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT DEBUG_INFO_DWARF4 DEBUG_INFO_DWARF5 DEBUG_INFO_REDUCED DEBUG_INFO_COMPRESSED DEBUG_INFO_SPLIT DEBUG_INFO_BTF; do
-                sed -i "/^CONFIG_${c}=/d" .config
+              # DEBUG_INFO 是一组 choice，先全部 undefine 再只开 NONE
+              for c in DEBUG_INFO DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT DEBUG_INFO_DWARF4 DEBUG_INFO_DWARF5 DEBUG_INFO_REDUCED DEBUG_INFO_COMPRESSED DEBUG_INFO_SPLIT DEBUG_INFO_BTF DEBUG_INFO_NONE; do
+                scripts/config --file .config --undefine "$c" || true
               done
-              sed -i '/^CONFIG_DEBUG_INFO_NONE=/d' .config
-              echo "CONFIG_DEBUG_INFO_NONE=y" >> .config
+              scripts/config --file .config --enable DEBUG_INFO_NONE || true
               ;;
             default)
               for c in DEBUG_BUGVERBOSE DEBUG_LIST DEBUG_SG DEBUG_NOTIFIERS DEBUG_CREDENTIALS RCU_TRACE SCHED_DEBUG PRINTK_TIME DYNAMIC_DEBUG DEBUG_ATOMIC_SLEEP DEBUG_PREEMPT DEBUG_SPINLOCK DEBUG_MUTEXES DEBUG_RT_MUTEXES DEBUG_WW_MUTEX_SLOWPATH DEBUG_LOCK_ALLOC DEBUG_LOCKDEP DEBUG_KOBJECT DEBUG_KOBJECT_RELEASE; do
-                sed -i "/^CONFIG_${c}=/d" .config
-                echo "# CONFIG_${c} is not set" >> .config
+                scripts/config --file .config --disable "$c" || true
               done
               ;;
             none)
@@ -225,26 +209,22 @@ jobs:
           case "${{ inputs.tune_sched_profile }}" in
             performance)
               for c in NO_HZ_FULL PREEMPT_DYNAMIC CPU_FREQ_DEFAULT_GOV_PERFORMANCE RCU_NOCB_CPU RCU_NOCB_CPU_DEFAULT_ALL; do
-                sed -i "/^CONFIG_${c}=/d" .config
-                echo "CONFIG_${c}=y" >> .config
+                scripts/config --file .config --enable "$c" || true
               done
               for c in MITIGATION_RETPOLINE MITIGATION_SPECTRE_BHI MITIGATION_IBPB_ENTRY MITIGATION_IBRS_ENTRY MITIGATION_L1TF MITIGATION_PTI RETPOLINE CPU_IBPB_ENTRY CPU_IBRS_ENTRY PAGE_TABLE_ISOLATION; do
-                sed -i "/^CONFIG_${c}=/d" .config
-                echo "# CONFIG_${c} is not set" >> .config
+                scripts/config --file .config --disable "$c" || true
               done
-              sed -i '/^CONFIG_CPU_FREQ_DEFAULT_GOV_ONDEMAND=/d' .config
-              echo "# CONFIG_CPU_FREQ_DEFAULT_GOV_ONDEMAND is not set" >> .config
+              scripts/config --file .config --disable CPU_FREQ_DEFAULT_GOV_ONDEMAND || true
               ;;
             lowlatency)
-              sed -i '/^CONFIG_PREEMPT_VOLUNTARY=/d' .config
-              sed -i '/^CONFIG_PREEMPT_NONE=/d' .config
-              echo "CONFIG_PREEMPT=y" >> .config
-              sed -i '/^CONFIG_HZ_250=/d' .config
-              sed -i '/^CONFIG_HZ_300=/d' .config
-              sed -i '/^CONFIG_HZ_100=/d' .config
-              echo "CONFIG_HZ_1000=y" >> .config
-              sed -i '/^CONFIG_RCU_BOOST=/d' .config
-              echo "CONFIG_RCU_BOOST=y" >> .config
+              scripts/config --file .config --enable PREEMPT || true
+              scripts/config --file .config --disable PREEMPT_VOLUNTARY || true
+              scripts/config --file .config --disable PREEMPT_NONE || true
+              scripts/config --file .config --enable HZ_1000 || true
+              scripts/config --file .config --disable HZ_250 || true
+              scripts/config --file .config --disable HZ_300 || true
+              scripts/config --file .config --disable HZ_100 || true
+              scripts/config --file .config --enable RCU_BOOST || true
               ;;
             none)
               ;;
@@ -257,25 +237,19 @@ jobs:
           cd kernel-source
           LTO="${{ inputs.lto_mode }}"
           if [ "$LTO" = "none" ]; then
-            sed -i '/^CONFIG_LTO=/d' .config
-            sed -i '/^CONFIG_LTO_CLANG_FULL=/d' .config
-            sed -i '/^CONFIG_LTO_CLANG_THIN=/d' .config
-            echo "CONFIG_LTO_NONE=y" >> .config
+            scripts/config --file .config --disable LTO || true
+            scripts/config --file .config --disable LTO_CLANG_FULL || true
+            scripts/config --file .config --disable LTO_CLANG_THIN || true
+            scripts/config --file .config --enable LTO_NONE || true
           else
-            sed -i '/^CONFIG_LTO=/d' .config
-            echo "CONFIG_LTO=y" >> .config
-            sed -i '/^CONFIG_LTO_NONE=/d' .config
-            echo "# CONFIG_LTO_NONE is not set" >> .config
+            scripts/config --file .config --enable LTO || true
+            scripts/config --file .config --disable LTO_NONE || true
             if [ "$LTO" = "full" ]; then
-              sed -i '/^CONFIG_LTO_CLANG_FULL=/d' .config
-              echo "CONFIG_LTO_CLANG_FULL=y" >> .config
-              sed -i '/^CONFIG_LTO_CLANG_THIN=/d' .config
-              echo "# CONFIG_LTO_CLANG_THIN is not set" >> .config
+              scripts/config --file .config --enable LTO_CLANG_FULL || true
+              scripts/config --file .config --disable LTO_CLANG_THIN || true
             else
-              sed -i '/^CONFIG_LTO_CLANG_THIN=/d' .config
-              echo "CONFIG_LTO_CLANG_THIN=y" >> .config
-              sed -i '/^CONFIG_LTO_CLANG_FULL=/d' .config
-              echo "# CONFIG_LTO_CLANG_FULL is not set" >> .config
+              scripts/config --file .config --enable LTO_CLANG_THIN || true
+              scripts/config --file .config --disable LTO_CLANG_FULL || true
             fi
           fi
 
