@@ -45,6 +45,9 @@ on:
       tune_profile:
         type: string
         default: 'none'
+      tune_sched_profile:
+        type: string
+        default: 'none'
       kernel_repo:
         type: string
         default: 'https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux-stable.git'
@@ -175,7 +178,7 @@ jobs:
             make ARCH="$KARCH" olddefconfig </dev/null
           fi
 
-      - name: 应用调优预设
+      - name: 应用调优预设（调试/体积）
         if: ${{ inputs.respect_config != true }}
         run: |
           set -euo pipefail
@@ -183,29 +186,6 @@ jobs:
           KARCH="${{ inputs.arch }}"
 
           case "${{ inputs.tune_profile }}" in
-            performance)
-              for c in NO_HZ_FULL PREEMPT_DYNAMIC CPU_FREQ_DEFAULT_GOV_PERFORMANCE RCU_NOCB_CPU RCU_NOCB_CPU_DEFAULT_ALL; do
-                sed -i "/^CONFIG_${c}=/d" .config
-                echo "CONFIG_${c}=y" >> .config
-              done
-              for c in MITIGATION_RETPOLINE MITIGATION_SPECTRE_BHI MITIGATION_IBPB_ENTRY MITIGATION_IBRS_ENTRY MITIGATION_L1TF MITIGATION_PTI RETPOLINE CPU_IBPB_ENTRY CPU_IBRS_ENTRY PAGE_TABLE_ISOLATION; do
-                sed -i "/^CONFIG_${c}=/d" .config
-                echo "# CONFIG_${c} is not set" >> .config
-              done
-              sed -i '/^CONFIG_CPU_FREQ_DEFAULT_GOV_ONDEMAND=/d' .config
-              echo "# CONFIG_CPU_FREQ_DEFAULT_GOV_ONDEMAND is not set" >> .config
-              ;;
-            lowlatency)
-              sed -i '/^CONFIG_PREEMPT_VOLUNTARY=/d' .config
-              sed -i '/^CONFIG_PREEMPT_NONE=/d' .config
-              echo "CONFIG_PREEMPT=y" >> .config
-              sed -i '/^CONFIG_HZ_250=/d' .config
-              sed -i '/^CONFIG_HZ_300=/d' .config
-              sed -i '/^CONFIG_HZ_100=/d' .config
-              echo "CONFIG_HZ_1000=y" >> .config
-              sed -i '/^CONFIG_RCU_BOOST=/d' .config
-              echo "CONFIG_RCU_BOOST=y" >> .config
-              ;;
             minimal)
               sed -i '/^CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE=/d' .config
               echo "CONFIG_CC_OPTIMIZE_FOR_SIZE=y" >> .config
@@ -230,6 +210,41 @@ jobs:
                 sed -i "/^CONFIG_${c}=/d" .config
                 echo "# CONFIG_${c} is not set" >> .config
               done
+              ;;
+            none)
+              ;;
+          esac
+
+      - name: 应用调优预设（调度/延迟）
+        if: ${{ inputs.respect_config != true }}
+        run: |
+          set -euo pipefail
+          cd kernel-source
+          KARCH="${{ inputs.arch }}"
+
+          case "${{ inputs.tune_sched_profile }}" in
+            performance)
+              for c in NO_HZ_FULL PREEMPT_DYNAMIC CPU_FREQ_DEFAULT_GOV_PERFORMANCE RCU_NOCB_CPU RCU_NOCB_CPU_DEFAULT_ALL; do
+                sed -i "/^CONFIG_${c}=/d" .config
+                echo "CONFIG_${c}=y" >> .config
+              done
+              for c in MITIGATION_RETPOLINE MITIGATION_SPECTRE_BHI MITIGATION_IBPB_ENTRY MITIGATION_IBRS_ENTRY MITIGATION_L1TF MITIGATION_PTI RETPOLINE CPU_IBPB_ENTRY CPU_IBRS_ENTRY PAGE_TABLE_ISOLATION; do
+                sed -i "/^CONFIG_${c}=/d" .config
+                echo "# CONFIG_${c} is not set" >> .config
+              done
+              sed -i '/^CONFIG_CPU_FREQ_DEFAULT_GOV_ONDEMAND=/d' .config
+              echo "# CONFIG_CPU_FREQ_DEFAULT_GOV_ONDEMAND is not set" >> .config
+              ;;
+            lowlatency)
+              sed -i '/^CONFIG_PREEMPT_VOLUNTARY=/d' .config
+              sed -i '/^CONFIG_PREEMPT_NONE=/d' .config
+              echo "CONFIG_PREEMPT=y" >> .config
+              sed -i '/^CONFIG_HZ_250=/d' .config
+              sed -i '/^CONFIG_HZ_300=/d' .config
+              sed -i '/^CONFIG_HZ_100=/d' .config
+              echo "CONFIG_HZ_1000=y" >> .config
+              sed -i '/^CONFIG_RCU_BOOST=/d' .config
+              echo "CONFIG_RCU_BOOST=y" >> .config
               ;;
             none)
               ;;
