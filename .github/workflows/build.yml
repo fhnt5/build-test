@@ -66,7 +66,7 @@ on:
         type: string
         default: ''
       respect_config:
-        description: '严格模式：原样使用 .config，不执行调优与 LTO 修改'
+        description: '严格模式：原样使用 .config，跳过调优与 LTO 修改（含下面的两个 tune 选项）'
         type: boolean
         default: true
       include_headers:
@@ -91,15 +91,20 @@ on:
         default: 'auto'
         options: ['auto', '1', '2', '4', '8', '16']
       lto_mode:
-        description: 'LLVM 链接时优化'
+        description: 'LLVM 链接时优化（需 respect_config=false；与 minimal 不兼容）'
         type: choice
         default: 'none'
         options: ['none', 'full', 'thin']
       tune_profile:
-        description: '调优预设（none=不修改 .config）'
+        description: '调优预设：调试/体积（none=不修改；需 respect_config=false）'
         type: choice
         default: 'none'
-        options: ['none', 'default', 'performance', 'lowlatency', 'minimal', 'debugoff']
+        options: ['none', 'default', 'debugoff', 'minimal']
+      tune_sched_profile:
+        description: '调优预设：调度/延迟（none=不修改；需 respect_config=false）'
+        type: choice
+        default: 'none'
+        options: ['none', 'lowlatency', 'performance']
       kernel_repo:
         description: '内核源码仓库 URL'
         type: string
@@ -187,6 +192,7 @@ jobs:
       parallel_jobs: ${{ inputs.parallel_jobs }}
       lto_mode: ${{ inputs.lto_mode }}
       tune_profile: ${{ inputs.tune_profile }}
+      tune_sched_profile: ${{ inputs.tune_sched_profile }}
       kernel_repo: ${{ inputs.kernel_repo }}
       kernel_ref: ${{ needs.resolve-ref.outputs.kernel_ref }}
 
@@ -201,6 +207,7 @@ jobs:
       rpm_arch: aarch64
       arch_boot: arch/arm64/boot/Image
       config_choice: ${{ inputs.config_choice }}
+      config_custom: ${{ inputs.config_custom }}
       respect_config: ${{ inputs.respect_config }}
       include_headers: ${{ inputs.include_headers }}
       headers_full_tree: ${{ inputs.headers_full_tree }}
@@ -208,6 +215,7 @@ jobs:
       parallel_jobs: ${{ inputs.parallel_jobs }}
       lto_mode: ${{ inputs.lto_mode }}
       tune_profile: ${{ inputs.tune_profile }}
+      tune_sched_profile: ${{ inputs.tune_sched_profile }}
       kernel_repo: ${{ inputs.kernel_repo }}
       kernel_ref: ${{ needs.resolve-ref.outputs.kernel_ref }}
 
