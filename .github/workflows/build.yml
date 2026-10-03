@@ -90,10 +90,6 @@ on:
         type: choice
         default: 'auto'
         options: ['auto', '1', '2', '4', '8', '16']
-      ccache:
-        description: '启用 ccache 编译器缓存'
-        type: boolean
-        default: false
       lto_mode:
         description: 'LLVM 链接时优化'
         type: choice
@@ -189,7 +185,6 @@ jobs:
       headers_full_tree: ${{ inputs.headers_full_tree }}
       strip_modules: ${{ inputs.strip_modules }}
       parallel_jobs: ${{ inputs.parallel_jobs }}
-      ccache: ${{ inputs.ccache }}
       lto_mode: ${{ inputs.lto_mode }}
       tune_profile: ${{ inputs.tune_profile }}
       kernel_repo: ${{ inputs.kernel_repo }}
@@ -211,7 +206,6 @@ jobs:
       headers_full_tree: ${{ inputs.headers_full_tree }}
       strip_modules: ${{ inputs.strip_modules }}
       parallel_jobs: ${{ inputs.parallel_jobs }}
-      ccache: ${{ inputs.ccache }}
       lto_mode: ${{ inputs.lto_mode }}
       tune_profile: ${{ inputs.tune_profile }}
       kernel_repo: ${{ inputs.kernel_repo }}
